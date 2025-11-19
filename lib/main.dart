@@ -208,16 +208,23 @@ class _YoloPageState extends State<YoloPage> {
     for (var i = 0; i < boxes.length; i++) {
       var box = boxes[i];
 
-      // --- 1. DÉCOUPE SÉCURISÉE ---
-      int x = max(0, box.x1.toInt());
-      int y = max(0, box.y1.toInt());
-      int w = min(originalImage.width - x, (box.x2 - box.x1).toInt());
-      int h = min(originalImage.height - y, (box.y2 - box.y1).toInt());
+      // --- ÉTAPE 1 : GÉOMÉTRIE & DÉCOUPE (PADDING) ---
+      // On prend les dimensions brutes de la boîte
+      double boxW = box.x2 - box.x1;
+      double boxH = box.y2 - box.y1;
+      // Calcul des coordonnées sécurisées (ne pas sortir de l'image)
+      int x = max(0, (box.x1).toInt());
+      int y = max(0, (box.y1).toInt());
+      int w = min(originalImage.width - x, (boxW).toInt());
+      int h = min(originalImage.height - y, (boxH).toInt());
 
-      if (w <= 0 || h <= 0) continue;
+      if (w <= 0 || h <= 0) {
+        box.text = "Erreur dim";
+        continue;
+      }
 
-      // On découpe
-      img.Image cropped = img.copyCrop(
+      // Extraction de la vignette
+      img.Image processed = img.copyCrop(
         originalImage,
         x: x,
         y: y,
@@ -225,57 +232,100 @@ class _YoloPageState extends State<YoloPage> {
         height: h,
       );
 
-      // --- 2. AMÉLIORATIONS D'IMAGE (LA CLÉ DU SUCCÈS) ---
+      // --- ÉTAPE 2 : L'ÉTIREMENT ANAMORPHIQUE (LE SECRET) ---
+      // Si l'image est plus haute que large (livre fin/vertical),
+      // on l'étire horizontalement pour décoller les caractères serrés.
+      if (processed.height > processed.width * 1.2) {
+        // On force la largeur à devenir égale à 80% de la hauteur (ratio presque carré)
+        // Cela "élargit" les lettres
+        int newWidth = (processed.height * 0.8).toInt();
 
-      // A. Rotation intelligente : Si l'image est verticale (hauteur > 1.2x largeur)
-      // On suppose que le texte est écrit de bas en haut (standard bibliothèque)
-      if (cropped.height > cropped.width * 1.2) {
-        cropped = img.copyRotate(
-          cropped,
-          angle: -90,
-        ); // Tourne de 90° vers la droite
+        processed = img.copyResize(
+          processed,
+          width: newWidth,
+          height: processed
+              .height, // On garde la hauteur, on change juste la largeur
+          interpolation:
+              img.Interpolation.cubic, // Lissage cubique indispensable
+        );
       }
 
-      // B. Noir et Blanc + Contraste
-      // Cela enlève la couleur des livres pour ne garder que le texte
-      cropped = img.grayscale(cropped);
-      cropped = img.contrast(
-        cropped,
+      // --- ÉTAPE 3 : UPSCALING (SUPER-RÉSOLUTION) ---
+      // ML Kit a besoin de gros caractères. On vise une hauteur de 300px minimum.
+      if (processed.height < 300) {
+        processed = img.copyResize(
+          processed,
+          height: 300, // La largeur s'adaptera automatiquement
+          interpolation: img.Interpolation.cubic,
+        );
+      }
+
+      // --- ÉTAPE 4 : LUMIÈRE & CONTRASTE ---
+      processed = img.grayscale(processed); // Noir et blanc
+      processed = img.contrast(
+        processed,
         contrast: 150,
-      ); // Augmente le contraste (100 = normal)
+      ); // Contraste agressif pour détacher l'encre
 
-      // C. Padding (Ajout de bords blancs)
-      // On crée une image un peu plus grande et on colle le crop au milieu
-      int padding = 10;
-      img.Image padded = img.Image(
-        width: cropped.width + (padding * 2),
-        height: cropped.height + (padding * 2),
-      );
-      img.fill(padded, color: img.ColorRgb8(255, 255, 255)); // Fond blanc
-      img.compositeImage(padded, cropped, dstX: padding, dstY: padding);
-
-      // C'est cette image finale optimisée qu'on sauvegarde
+      // Sauvegarde fichier temporaire
       File cropFile = File('${tempDir.path}/temp_crop_$i.jpg');
-      await cropFile.writeAsBytes(
-        img.encodeJpg(padded),
-      ); // On sauvegarde 'padded'
+      await cropFile.writeAsBytes(img.encodeJpg(processed, quality: 100));
 
-      // Sauvegarde pour affichage UI
+      // On sauvegarde l'image traitée pour l'afficher dans la liste (debug visuel)
       box.cropFile = cropFile;
 
-      // --- 3. LECTURE OCR ---
-      final inputImage = InputImage.fromFilePath(cropFile.path);
-      final recognizedText = await _textRecognizer.processImage(inputImage);
+      // --- ÉTAPE 5 : OCR AVEC TIMEOUT ---
+      try {
+        final inputImage = InputImage.fromFilePath(cropFile.path);
 
-      // --- 4. NETTOYAGE DU TEXTE (REGEX) ---
-      // On remplace les sauts de ligne par des espaces
-      String rawText = recognizedText.text.replaceAll("\n", " ").trim();
+        final recognizedText = await _textRecognizer
+            .processImage(inputImage)
+            .timeout(const Duration(milliseconds: 2500));
 
-      // OPTIONNEL : Filtrage strict (Garder seulement Majuscules et Chiffres)
-      // Si vos cotes ressemblent à "823.91 ROW", ceci enlèvera le bruit
-      // rawText = rawText.replaceAll(RegExp(r'[^A-Z0-9. ]'), '');
+        String rawText = recognizedText.text;
 
-      box.text = rawText;
+        // --- ÉTAPE 6 : NETTOYAGE REGEX DEWEY ---
+        // A. Nettoyage de base (Sauts de ligne -> Espace)
+        String cleanText = rawText.replaceAll("\n", " ").trim().toUpperCase();
+
+        // B. Correction des erreurs OCR classiques (Lettres -> Chiffres au début)
+        // Si ça commence par O, Q, D, Z, S, B, on remplace par les chiffres correspondants
+        if (cleanText.isNotEmpty) {
+          // Remplacer les caractères parasites courants au début
+          cleanText = cleanText.replaceFirstMapped(
+            RegExp(r'^[OQDZSB]+'),
+            (match) => match
+                .group(0)!
+                .replaceAll(RegExp(r'[OQD]'), '0')
+                .replaceAll('Z', '2')
+                .replaceAll('S', '5')
+                .replaceAll('B', '8'),
+          );
+        }
+
+        // C. Remplacer les séparateurs bizarres par des points
+        cleanText = cleanText.replaceAll(RegExp(r'[-_,]'), ".");
+
+        // D. Formatage Dewey Strict : "3 chiffres + point"
+        // Ex: "82391" -> "823.91"
+        cleanText = cleanText.replaceFirstMapped(
+          RegExp(r'^(\d{3})\s*(\d)'),
+          (Match m) => "${m[1]}.${m[2]}",
+        );
+
+        // E. Séparation Chiffres / Lettres (Saut de ligne)
+        // Ex: "823.91 TOL" -> "823.91\nTOL"
+        cleanText = cleanText.replaceAllMapped(
+          RegExp(r'([0-9.]+)\s*([A-Z]+)'),
+          (Match m) => "${m[1]}\n${m[2]}",
+        );
+
+        box.text = cleanText.isEmpty ? "?" : cleanText;
+      } catch (e) {
+        print("Erreur OCR box $i: $e");
+        box.text = "⚠️";
+      }
+
       setState(() {});
     }
 
@@ -400,26 +450,36 @@ class _YoloPageState extends State<YoloPage> {
                       )
                     : LayoutBuilder(
                         builder: (context, constraints) {
-                          return Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              Image.file(_image!, fit: BoxFit.contain),
-                              if (_recognitions.isNotEmpty)
-                                CustomPaint(
-                                  painter: OcrPainter(
-                                    recognitions: _recognitions,
-                                    imageSize: Size(
-                                      _originalImage!.width.toDouble(),
-                                      _originalImage!.height.toDouble(),
+                          // --- AJOUT DU ZOOM ICI ---
+                          return InteractiveViewer(
+                            panEnabled:
+                                true, // Permet de se déplacer avec le doigt
+                            boundaryMargin: const EdgeInsets.all(
+                              0,
+                            ), // Marge autour
+                            minScale: 1.0, // Zoom minimum (taille normale)
+                            maxScale: 5.0, // Zoom maximum (x5)
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                Image.file(_image!, fit: BoxFit.contain),
+                                if (_recognitions.isNotEmpty)
+                                  CustomPaint(
+                                    painter: OcrPainter(
+                                      recognitions: _recognitions,
+                                      imageSize: Size(
+                                        _originalImage!.width.toDouble(),
+                                        _originalImage!.height.toDouble(),
+                                      ),
+                                      widgetSize: Size(
+                                        constraints.maxWidth,
+                                        constraints.maxHeight,
+                                      ),
                                     ),
-                                    widgetSize: Size(
-                                      constraints.maxWidth,
-                                      constraints.maxHeight,
-                                    ),
+                                    child: const SizedBox.expand(),
                                   ),
-                                  child: const SizedBox.expand(),
-                                ),
-                            ],
+                              ],
+                            ),
                           );
                         },
                       ),
@@ -483,7 +543,7 @@ class _YoloPageState extends State<YoloPage> {
                                                   BorderRadius.circular(8),
                                               child: Image.file(
                                                 rec.cropFile!,
-                                                fit: BoxFit.cover,
+                                                fit: BoxFit.contain,
                                               ),
                                             )
                                           : const Center(
