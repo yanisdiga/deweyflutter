@@ -45,13 +45,5 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
-	<key>NSCameraUsageDescription</key>
-    <string>Nous avons besoin de la caméra pour scanner les livres.</string>
-    
-    <key>NSPhotoLibraryUsageDescription</key>
-    <string>Nous avons besoin d'accéder à la galerie pour charger une photo.</string>
-    
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Nous avons besoin du micro pour la vidéo.</string>
 </dict>
 </plist>
