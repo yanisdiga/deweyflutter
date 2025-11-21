@@ -64,7 +64,7 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/book_label_obb_s2_float32.tflite
+    - assets/models/book_label_obb_s2_float32.tflite
 
   # To add assets to your application, add an assets section, like this:
   # assets:

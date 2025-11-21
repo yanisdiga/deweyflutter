@@ -18,7 +18,8 @@ void main() {
 class Recognition {
   final double x1, y1, x2, y2, score;
   String text;
-  File? cropFile; // <--- Nouvelle variable pour stocker la vignette
+  File? cropFile; // Variable pour stocker la vignette
+  bool? isMisplaced; // null=pas vérifié, false=ok, true=mal placé
 
   Recognition(
     this.x1,
@@ -28,6 +29,7 @@ class Recognition {
     this.score, {
     this.text = "",
     this.cropFile,
+    this.isMisplaced,
   });
 }
 
@@ -51,22 +53,40 @@ class _YoloPageState extends State<YoloPage> {
 
   final _textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
 
+  // --- AJOUT 1 : Contrôleur pour le zoom ---
+  final TransformationController _transformController =
+      TransformationController();
+  double _currentScale = 1.0; // On stocke le niveau de zoom ici
+
   @override
   void initState() {
     super.initState();
     _loadModel();
+
+    // --- AJOUT 2 : On écoute le changement de zoom ---
+    _transformController.addListener(() {
+      // getMaxScaleOnAxis() nous donne le niveau de zoom actuel
+      final newScale = _transformController.value.getMaxScaleOnAxis();
+      if (newScale != _currentScale) {
+        setState(() {
+          _currentScale = newScale;
+        });
+      }
+    });
   }
 
   @override
   void dispose() {
     _textRecognizer.close();
+    _transformController
+        .dispose(); // <-- N'oubliez pas de disposer le contrôleur
     super.dispose();
   }
 
   Future<void> _loadModel() async {
     try {
       _interpreter = await Interpreter.fromAsset(
-        'assets/book_label_obb_s2_float32.tflite',
+        'assets/models/book_label_obb_s2_float32.tflite',
       );
       setState(() => _status = "Modèle prêt");
     } catch (e) {
@@ -208,7 +228,7 @@ class _YoloPageState extends State<YoloPage> {
     for (var i = 0; i < boxes.length; i++) {
       var box = boxes[i];
 
-      // --- ÉTAPE 1 : GÉOMÉTRIE & DÉCOUPE (PADDING) ---
+      // --- ÉTAPE 1 à 4 : GÉOMÉTRIE, DÉCOUPE, TRAITEMENT (Pas de changement) ---
       // On prend les dimensions brutes de la boîte
       double boxW = box.x2 - box.x1;
       double boxH = box.y2 - box.y1;
@@ -233,39 +253,29 @@ class _YoloPageState extends State<YoloPage> {
       );
 
       // --- ÉTAPE 2 : L'ÉTIREMENT ANAMORPHIQUE (LE SECRET) ---
-      // Si l'image est plus haute que large (livre fin/vertical),
-      // on l'étire horizontalement pour décoller les caractères serrés.
       if (processed.height > processed.width * 1.2) {
-        // On force la largeur à devenir égale à 80% de la hauteur (ratio presque carré)
-        // Cela "élargit" les lettres
         int newWidth = (processed.height * 0.8).toInt();
 
         processed = img.copyResize(
           processed,
           width: newWidth,
-          height: processed
-              .height, // On garde la hauteur, on change juste la largeur
-          interpolation:
-              img.Interpolation.cubic, // Lissage cubique indispensable
+          height: processed.height,
+          interpolation: img.Interpolation.cubic,
         );
       }
 
       // --- ÉTAPE 3 : UPSCALING (SUPER-RÉSOLUTION) ---
-      // ML Kit a besoin de gros caractères. On vise une hauteur de 300px minimum.
       if (processed.height < 300) {
         processed = img.copyResize(
           processed,
-          height: 300, // La largeur s'adaptera automatiquement
+          height: 300,
           interpolation: img.Interpolation.cubic,
         );
       }
 
       // --- ÉTAPE 4 : LUMIÈRE & CONTRASTE ---
-      processed = img.grayscale(processed); // Noir et blanc
-      processed = img.contrast(
-        processed,
-        contrast: 150,
-      ); // Contraste agressif pour détacher l'encre
+      processed = img.grayscale(processed);
+      processed = img.contrast(processed, contrast: 150);
 
       // Sauvegarde fichier temporaire
       File cropFile = File('${tempDir.path}/temp_crop_$i.jpg');
@@ -274,61 +284,95 @@ class _YoloPageState extends State<YoloPage> {
       // On sauvegarde l'image traitée pour l'afficher dans la liste (debug visuel)
       box.cropFile = cropFile;
 
+      // --- LOG 1 : AVANT OCR (pour vérifier l'entrée) ---
+      print("--- LOG OCR #${i + 1} START ---");
+      print("Path: ${cropFile.path}");
+      print("Dimensions (traitées): ${processed.width}x${processed.height}");
+      // ----------------------------------------------------
+
       // --- ÉTAPE 5 : OCR AVEC TIMEOUT ---
       try {
         final inputImage = InputImage.fromFilePath(cropFile.path);
 
         final recognizedText = await _textRecognizer
             .processImage(inputImage)
-            .timeout(const Duration(milliseconds: 2500));
+            .timeout(const Duration(milliseconds: 4500));
 
         String rawText = recognizedText.text;
 
-        // --- ÉTAPE 6 : NETTOYAGE REGEX DEWEY ---
+        // --- ÉTAPE 6 : NETTOYAGE REGEX DEWEY (Pas de changement ici, mais inclus pour le contexte) ---
         // A. Nettoyage de base (Sauts de ligne -> Espace)
         String cleanText = rawText.replaceAll("\n", " ").trim().toUpperCase();
 
-        // B. Correction des erreurs OCR classiques (Lettres -> Chiffres au début)
-        // Si ça commence par O, Q, D, Z, S, B, on remplace par les chiffres correspondants
+        // B. Correction CIBLÉE : Lettre -> Chiffre UNIQUEMENT si suivi d'un chiffre
+        // Exemple : "O78" devient "078", mais "DRO" reste "DRO".
         if (cleanText.isNotEmpty) {
-          // Remplacer les caractères parasites courants au début
-          cleanText = cleanText.replaceFirstMapped(
-            RegExp(r'^[OQDZSB]+'),
-            (match) => match
-                .group(0)!
-                .replaceAll(RegExp(r'[OQD]'), '0')
-                .replaceAll('Z', '2')
-                .replaceAll('S', '5')
-                .replaceAll('B', '8'),
+          cleanText = cleanText.replaceAllMapped(
+            RegExp(
+              r'([OQDZSBILG])(?=\d)',
+            ), // Capture la lettre seulement si un chiffre la suit immédiatement
+            (Match m) {
+              String letter = m.group(1)!;
+              switch (letter) {
+                case 'O':
+                case 'Q':
+                case 'D':
+                  return '0';
+                case 'I':
+                case 'L':
+                  return '1';
+                case 'Z':
+                  return '2';
+                case 'S':
+                  return '5';
+                case 'G':
+                  return '6';
+                case 'B':
+                  return '8';
+                default:
+                  return letter;
+              }
+            },
           );
         }
 
         // C. Remplacer les séparateurs bizarres par des points
         cleanText = cleanText.replaceAll(RegExp(r'[-_,]'), ".");
 
-        // D. Formatage Dewey Strict : "3 chiffres + point"
-        // Ex: "82391" -> "823.91"
-        cleanText = cleanText.replaceFirstMapped(
-          RegExp(r'^(\d{3})\s*(\d)'),
+        // --- NOUVEAU RÉGLAGE : Supprimer les espaces AVANT un point ---
+        // Le regex \s+\. signifie "un ou plusieurs espaces suivis d'un point"
+        cleanText = cleanText.replaceAll(RegExp(r'\s+\.'), ".");
+
+        // D. Formatage Dewey : Règle des "3 chiffres + point + suite"
+        // On utilise replaceAllMapped pour forcer l'insertion du point après les 3 premiers chiffres
+        // dès que l'on trouve une séquence de 3 chiffres suivis par d'autres chiffres.
+        cleanText = cleanText.replaceAllMapped(
+          RegExp(
+            r'(\d{3})\s*(\d+)',
+          ), // Cherche: 3 chiffres (G1), espace(s) optionnels, puis 1 ou plusieurs chiffres (G2)
           (Match m) => "${m[1]}.${m[2]}",
         );
 
         // E. Séparation Chiffres / Lettres (Saut de ligne)
-        // Ex: "823.91 TOL" -> "823.91\nTOL"
         cleanText = cleanText.replaceAllMapped(
           RegExp(r'([0-9.]+)\s*([A-Z]+)'),
           (Match m) => "${m[1]}\n${m[2]}",
         );
 
         box.text = cleanText.isEmpty ? "?" : cleanText;
+        print("LOG OCR #${i + 1} SUCCESS: Résultat Nettoyé: '${box.text}'");
       } catch (e) {
-        print("Erreur OCR box $i: $e");
+        // --- LOG 2 : EN CAS D'ÉCHEC ---
+        // La raison de l'échec (TimeoutException ou autre erreur MLKit)
+        print("LOG OCR #${i + 1} FAILURE: Erreur complète: $e");
         box.text = "⚠️";
       }
 
+      print("--- LOG OCR #${i + 1} END ---");
       setState(() {});
     }
 
+    _checkShelfOrder(); // VÉRIFIER LE TRI
     setState(() {
       _isBusy = false;
       _status = "Terminé : ${boxes.length} résultats";
@@ -420,6 +464,127 @@ class _YoloPageState extends State<YoloPage> {
     return rows.expand((element) => element).toList();
   }
 
+  // --- ALGORITHME DE VÉRIFICATION DU TRI ---
+
+  void _checkShelfOrder() {
+    if (_recognitions.isEmpty) return;
+
+    // 1. Préparation : On parse tout le monde
+    // items contient les objets Dewey ou null si illisible
+    List<_DeweyItem?> items = _recognitions
+        .map((r) => _parseDewey(r.text))
+        .toList();
+
+    // On reset tout le monde à "Mal placé" par défaut pour être sûr
+    for (var r in _recognitions) r.isMisplaced = true;
+
+    // Liste des index qu'on considère comme "Bien rangés" (La Chaîne de Confiance)
+    List<int> validIndices = [];
+
+    for (var i = 0; i < items.length; i++) {
+      var current = items[i];
+
+      // Si illisible, on ignore (reste gris/neutre selon ta logique d'affichage)
+      if (current == null) {
+        _recognitions[i].isMisplaced = null;
+        continue;
+      }
+
+      // CAS 1 : C'est le tout premier livre valide
+      if (validIndices.isEmpty) {
+        validIndices.add(i);
+        _recognitions[i].isMisplaced = false; // Validé
+        continue;
+      }
+
+      // On récupère le dernier livre validé (Le sommet du mur actuel)
+      int lastIndex = validIndices.last;
+      var lastValid = items[lastIndex]!;
+
+      // CAS 2 : Comparaison normale
+      if (current.compareTo(lastValid) >= 0) {
+        // Ça monte ou c'est égal -> Tout va bien, on l'ajoute au mur
+        validIndices.add(i);
+        _recognitions[i].isMisplaced = false;
+      } else {
+        // CAS 3 : CONFLIT ! (Ça redescend)
+        // current < lastValid.
+        // Exemple: On a validé [COL], puis [COU]. Maintenant on a [COL ESS].
+        // [COL ESS] est plus petit que [COU].
+
+        bool intruderFound = false;
+
+        // On regarde l'avant-dernier validé (Le Grand-Père)
+        if (validIndices.length >= 2) {
+          int grandParentIndex = validIndices[validIndices.length - 2];
+          var grandParent = items[grandParentIndex]!;
+
+          // Est-ce que le livre actuel irait bien après le Grand-Père ?
+          // (Est-ce que COL ESS est plus grand que le COL DRO du début ?)
+          if (current.compareTo(grandParent) >= 0) {
+            // OUI ! Donc c'est le "Père" (lastIndex) qui était un intrus trop grand.
+
+            // 1. On invalide le précédent (qui était vert, on le met rouge)
+            _recognitions[lastIndex].isMisplaced = true;
+
+            // 2. On le retire de la chaîne de confiance
+            validIndices.removeLast();
+
+            // 3. On valide le courant à la place
+            validIndices.add(i);
+            _recognitions[i].isMisplaced = false;
+
+            intruderFound = true;
+          }
+        } else {
+          // Cas spécial : Il n'y a qu'un seul livre validé avant (le tout premier).
+          // Si le livre actuel est plus petit que le tout premier,
+          // c'est peut-être le tout premier qui est l'intrus !
+          // Mais c'est risqué. Pour l'instant, on suppose que le 1er est toujours juste.
+          // Si tu veux être strict : on ne fait rien, le livre courant est marqué faux.
+        }
+
+        if (!intruderFound) {
+          // Si on n'a pas trouvé d'intrus avant, c'est que le livre actuel est vraiment mal rangé.
+          _recognitions[i].isMisplaced = true;
+        }
+      }
+    }
+
+    setState(() {});
+  }
+
+  // Utilitaire pour parser et comparer
+  _DeweyItem? _parseDewey(String text) {
+    // Nettoyage : sauts de ligne deviennent espaces, trim
+    String clean = text.replaceAll("\n", " ").trim();
+
+    // Regex : Groupe 1 = Chiffre, Groupe 2 = TOUT LE RESTE
+    final reg = RegExp(r'^([0-9.]+)\s*(.*)$');
+    final match = reg.firstMatch(clean);
+
+    if (match == null) return null;
+
+    try {
+      double number = double.parse(match.group(1)!);
+
+      // On récupère la partie texte (ex: "DIR TES" ou "COD CIV")
+      String rawSuffix = match.group(2) ?? "";
+
+      // On découpe par les espaces pour avoir les blocs séparés
+      // ex: ["DIR", "TES"] ou ["COD", "CIV"] ou ["DIR"]
+      List<String> parts = rawSuffix.trim().split(RegExp(r'\s+'));
+
+      String p1 = parts.isNotEmpty ? parts[0] : "";
+      String p2 = parts.length > 1 ? parts[1] : ""; // Le 2ème bloc (ex: TES)
+
+      return _DeweyItem(number, p1, p2);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // --- LA MÉTHODE BUILD DOIT ÊTRE ICI (DANS _YoloPageState) ---
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -450,15 +615,13 @@ class _YoloPageState extends State<YoloPage> {
                       )
                     : LayoutBuilder(
                         builder: (context, constraints) {
-                          // --- AJOUT DU ZOOM ICI ---
                           return InteractiveViewer(
-                            panEnabled:
-                                true, // Permet de se déplacer avec le doigt
-                            boundaryMargin: const EdgeInsets.all(
-                              0,
-                            ), // Marge autour
-                            minScale: 1.0, // Zoom minimum (taille normale)
-                            maxScale: 5.0, // Zoom maximum (x5)
+                            // --- AJOUT 3 : Lier le contrôleur ---
+                            transformationController: _transformController,
+                            panEnabled: true,
+                            boundaryMargin: const EdgeInsets.all(0),
+                            minScale: 1.0,
+                            maxScale: 10.0, // J'ai augmenté un peu le max
                             child: Stack(
                               fit: StackFit.expand,
                               children: [
@@ -475,6 +638,8 @@ class _YoloPageState extends State<YoloPage> {
                                         constraints.maxWidth,
                                         constraints.maxHeight,
                                       ),
+                                      // --- AJOUT 4 : Passer l'échelle actuelle ---
+                                      scale: _currentScale,
                                     ),
                                     child: const SizedBox.expand(),
                                   ),
@@ -607,11 +772,28 @@ class _YoloPageState extends State<YoloPage> {
                                       ),
                                     ),
 
-                                    // Icône de validation
-                                    if (rec.text.isNotEmpty)
+                                    // Icône de statut de tri
+                                    if (rec.isMisplaced == true)
+                                      const Tooltip(
+                                        message:
+                                            "Mal placé ! (Devrait être avant le précédent)",
+                                        child: Icon(
+                                          Icons.warning_amber_rounded,
+                                          color: Colors.red,
+                                          size: 30,
+                                        ),
+                                      )
+                                    else if (rec.isMisplaced == false)
                                       const Icon(
                                         Icons.check_circle,
                                         color: Colors.green,
+                                        size: 30,
+                                      )
+                                    else
+                                      // Cas où le texte est vide ou non parsable
+                                      const Icon(
+                                        Icons.help_outline,
+                                        color: Colors.grey,
                                       ),
                                   ],
                                 ),
@@ -661,24 +843,46 @@ class _YoloPageState extends State<YoloPage> {
   }
 }
 
+// Petite classe helper pour comparer facilement (à mettre hors de la classe State ou dedans)
+class _DeweyItem implements Comparable<_DeweyItem> {
+  final double number;
+  final String part1; // ex: COD ou DIR
+  final String part2; // ex: CIV ou TES (peut être vide)
+
+  _DeweyItem(this.number, this.part1, this.part2);
+
+  @override
+  int compareTo(_DeweyItem other) {
+    // 1. Comparer les numéros (348 vs 372)
+    int numComp = number.compareTo(other.number);
+    if (numComp != 0) return numComp;
+
+    // 2. Comparer le premier mot (COD vs DIR)
+    int p1Comp = part1.compareTo(other.part1);
+    if (p1Comp != 0) return p1Comp;
+
+    // 3. Comparer le second mot (ABC vs TES)
+    // "rien" (vide) est considéré comme "plus petit" que "quelque chose"
+    return part2.compareTo(other.part2);
+  }
+}
+
 class OcrPainter extends CustomPainter {
   final List<Recognition> recognitions;
   final Size imageSize;
   final Size widgetSize;
+  final double scale; // --- Variable reçue du contrôleur ---
 
   OcrPainter({
     required this.recognitions,
     required this.imageSize,
     required this.widgetSize,
+    required this.scale, // --- Requis ---
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    final Paint boxPaint = Paint()
-      ..color = Colors.greenAccent
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3.0;
-
+    // Calcul des ratios (inchangé)
     double renderedWidth, renderedHeight;
     double ratioImage = imageSize.width / imageSize.height;
     double ratioScreen = size.width / size.height;
@@ -696,8 +900,35 @@ class OcrPainter extends CustomPainter {
     double offsetX = (size.width - renderedWidth) / 2;
     double offsetY = (size.height - renderedHeight) / 2;
 
+    // --- CALCUL DYNAMIQUE DES TAILLES ---
+    // Plus le 'scale' est grand (zoom), plus on divise la taille pour qu'elle reste visuellement fine.
+    // On définit une épaisseur de base de 3.0 et une police de 14.0
+    double strokeWidth = 3.0 / scale;
+    double fontSize = 14.0 / scale;
+
+    // On fixe une limite min pour que ça ne disparaisse pas complètement si on dézoome trop
+    if (strokeWidth < 1.0) strokeWidth = 1.0;
+    if (fontSize < 8.0) fontSize = 8.0;
+
     for (var i = 0; i < recognitions.length; i++) {
       var rec = recognitions[i];
+
+      // --- LOGIQUE DE COULEUR ---
+      Color boxColor;
+      if (rec.isMisplaced == true) {
+        boxColor = Colors.red; // Mal placé -> Rouge
+      } else if (rec.isMisplaced == false) {
+        boxColor = Colors.greenAccent; // Bien placé -> Vert
+      } else {
+        boxColor = Colors.blueAccent; // Pas encore vérifié -> Bleu (optionnel)
+      }
+
+      // Définition du style avec la largeur dynamique
+      final Paint boxPaint = Paint()
+        ..color = boxColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeWidth;
+
       double left = (rec.x1 * scaleX) + offsetX;
       double top = (rec.y1 * scaleY) + offsetY;
       double right = (rec.x2 * scaleX) + offsetX;
@@ -705,27 +936,38 @@ class OcrPainter extends CustomPainter {
 
       canvas.drawRect(Rect.fromLTRB(left, top, right, bottom), boxPaint);
 
-      // Numéro sur l'image pour faire le lien avec la liste
+      // --- DESSIN DU CHIFFRE ---
       TextSpan span = TextSpan(
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 14,
+        style: TextStyle(
+          color: boxColor, // Le texte prend la couleur de la boîte
+          fontSize: fontSize, // Taille dynamique
           fontWeight: FontWeight.bold,
+          // Petit contour noir autour du texte pour lisibilité si fond clair
+          shadows: [
+            Shadow(offset: Offset(-1 / scale, -1 / scale), color: Colors.black),
+            Shadow(offset: Offset(1 / scale, -1 / scale), color: Colors.black),
+            Shadow(offset: Offset(1 / scale, 1 / scale), color: Colors.black),
+            Shadow(offset: Offset(-1 / scale, 1 / scale), color: Colors.black),
+          ],
         ),
         text: "${i + 1}",
       );
+
       TextPainter tp = TextPainter(
         text: span,
         textDirection: TextDirection.ltr,
       );
       tp.layout();
 
-      Paint circlePaint = Paint()..color = Colors.indigo;
-      canvas.drawCircle(Offset(left, top), 12, circlePaint);
-      tp.paint(canvas, Offset(left - tp.width / 2, top - tp.height / 2));
+      // On dessine le numéro au coin en haut à gauche de la boîte
+      tp.paint(canvas, Offset(left, top - (fontSize + 2)));
     }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+  bool shouldRepaint(covariant OcrPainter oldDelegate) {
+    // On redessine si la liste change OU si le zoom change
+    return oldDelegate.recognitions != recognitions ||
+        oldDelegate.scale != scale;
+  }
 }
