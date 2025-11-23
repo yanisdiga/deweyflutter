@@ -10,6 +10,13 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    packaging {
+        jniLibs {
+            // En cas de doublon, on garde le premier fichier trouvé
+            pickFirsts.add("**/libonnxruntime.so")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -24,7 +31,7 @@ android {
         applicationId = "com.example.deweyflutter"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        minSdk = 24
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -41,4 +48,9 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Cette ligne force l'inclusion des binaires natifs (.so) pour Android
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.17.0")
 }

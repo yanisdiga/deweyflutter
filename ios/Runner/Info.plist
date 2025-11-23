@@ -44,6 +44,12 @@
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
-	<true/>
+	<true/>  
+	<!-- Permission pour la CAMÉRA -->
+    <key>NSCameraUsageDescription</key>
+    <string>Cette application a besoin de la caméra pour scanner les cotes des livres.</string>
+    <!-- Permission pour la GALERIE (si tu l'utilises aussi) -->
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Cette application a besoin d'accéder à vos photos pour analyser des images de livres.</string>
 </dict>
 </plist>

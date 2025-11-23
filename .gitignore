@@ -10,36 +10,65 @@
 .history
 .svn/
 .swiftpm/
-migrate_working_dir/
 
-# IntelliJ related
+# IntelliJ / Android Studio
 *.iml
 *.ipr
 *.iws
 .idea/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
+# VS Code
+.vscode/
 
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
+# --- FLUTTER/DART ---
 .dart_tool/
+.flutter-plugins
 .flutter-plugins-dependencies
 .pub-cache/
 .pub/
 /build/
 /coverage/
 
-# Symbolication related
-app.*.symbols
+# --- ANDROID (Très Important) ---
+# Contient le chemin du SDK spécifique à ton PC (Windows)
+android/local.properties
+# Dossiers de build et cache
+android/.gradle
+android/app/build
+android/*/*/build
+android/captures/
+android/gradlew
+android/gradlew.bat
+# Clés de signature (ne jamais commiter ça !)
+android/key.properties
+*.jks
+*.keystore
 
-# Obfuscation related
-app.*.map.json
+# --- IOS (Très Important pour Codemagic) ---
+# Dépendances CocoaPods (Codemagic fera "pod install" lui-même)
+ios/Pods/
+ios/.symlinks/
+# Fichiers générés par Flutter pour iOS
+ios/Flutter/app.flx
+ios/Flutter/app.zip
+ios/Flutter/flutter_assets/
+ios/Flutter/view_controller_libs/
+ios/Flutter/App.framework
+ios/Flutter/Flutter.framework
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+# Cache Xcode
+ios/DerivedData/
 
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
+# --- MAC OS ---
+.DS_Store
+
+# --- WINDOWS ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- TES MODÈLES ML (Optionnel) ---
+# Si tes fichiers .onnx ou .tflite font plus de 100Mo, GitHub les refusera.
+# Sinon, tu DOIS les laisser commiter pour que Codemagic puisse les inclure dans l'app.
+# assets/models/  <-- NE DECOMMENTE PAS CA, sinon tes modèles ne seront pas dans l'app !
