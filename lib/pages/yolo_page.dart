@@ -316,6 +316,21 @@ class _YoloPageState extends State<YoloPage> {
         // 3. Uniformisation des séparateurs (tirets, underscores -> points)
         cleanText = cleanText.replaceAll(RegExp(r'[-_,]'), ".");
 
+        // 4. Nettoyage spécifique : Suppression d'une lettre isolée au début si suivie de chiffres
+        // Ex: "Y | 320 .94" -> "320 .94"
+        // Ex: "A 320" -> "320"
+        cleanText = cleanText.replaceAll(
+          RegExp(r'^[A-Z]\s*[|.]?\s*(?=\d{3})'),
+          "",
+        );
+
+        // 5. Nettoyage spécifique : Suppression d'une lettre isolée entre des chiffres et un point
+        // Ex: "612 F .7" -> "612.7"
+        cleanText = cleanText.replaceAllMapped(
+          RegExp(r'(\d+)\s+[A-Z]\s+(\.\d+)'),
+          (Match m) => "${m[1]}${m[2]}",
+        );
+
         // --- LOGIQUE DE RECONSTRUCTION ---
 
         // CAS A : Cote FICTION (Commence par une Lettre : R, BD, J, SF...)
@@ -409,9 +424,20 @@ class _YoloPageState extends State<YoloPage> {
     if (_recognitions.isEmpty) return;
 
     // 1. Parsing
-    List<DeweyItem> allItems = _recognitions
-        .map((r) => _parseDewey(r.text))
-        .toList();
+    List<DeweyItem> allItems = _recognitions.map((r) {
+      // Validation supplémentaire : Lettre suivie d'un chiffre (ex: "A1") est invalide
+      // Mais "T.1" ou "vol.1" sont valides (car séparateur)
+      if (RegExp(r'[a-zA-Z][0-9]').hasMatch(r.text)) {
+        return DeweyItem(
+          isNumeric: false,
+          prefix: r.text,
+          number: 0,
+          cutter: "",
+          isValid: false,
+        );
+      }
+      return _parseDewey(r.text);
+    }).toList();
 
     // 2. Candidats Valides (Liste verte potentielle)
     List<MapEntry<int, DeweyItem>> candidates = [];

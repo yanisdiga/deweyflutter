@@ -9,14 +9,14 @@ class OcrPainter extends CustomPainter {
   final double scale;
 
   // 1. AJOUT DU PARAMÈTRE
-  final bool showArrows; 
+  final bool showArrows;
 
   OcrPainter({
     required this.recognitions,
     required this.imageSize,
     required this.widgetSize,
     required this.scale,
-    this.showArrows = true, 
+    this.showArrows = true,
   });
 
   @override
@@ -115,6 +115,7 @@ class OcrPainter extends CustomPainter {
             offsetX,
             offsetY,
             strokeWidth,
+            i, // On passe l'index pour varier les couleurs/hauteurs
           );
         }
       }
@@ -131,16 +132,10 @@ class OcrPainter extends CustomPainter {
     double offsetX,
     double offsetY,
     double baseStrokeWidth,
+    int index, // Index de l'élément courant
   ) {
     // ============================================================
-    // 🛠️ ZONE DE CONFIGURATION
-    // ============================================================
-    final Color arrowColor = const Color.fromARGB(255, 255, 0, 0);
-    final double lineThickness = baseStrokeWidth * 1.0;
-    final double archHeight = 20.0;
-
-    // NOUVEAU : Rayon de l'arrondi
-    double cornerRadius = 15.0;
+    // 🛠️ ZONE DE CONFIGURATION DYNAMIQUE
     // ============================================================
 
     // 1. Parsing
@@ -163,35 +158,45 @@ class OcrPainter extends CustomPainter {
     double targetX = (targetXRaw * scaleX) + offsetX;
     double targetY = (target.y1 * scaleY) + offsetY;
 
-    // 3. Peinture
+    // 3. CONFIGURATION VISUELLE (COULEUR & HAUTEUR)
+
+    // A. Couleur Unique (DeepPurple pour être visible mais sobre)
+    final Color arrowColor = Colors.red;
+    final double lineThickness = baseStrokeWidth * 1.0;
+
+    // B. Hauteur basée sur la distance horizontale
+    // Plus c'est loin, plus c'est haut.
+    double distanceHorizontale = (targetX - startX).abs();
+
+    // Formule : Base 30 + 15% de la distance, plafonné à 120
+    final double archHeight = (30.0 + distanceHorizontale * 0.05).clamp(
+      30.0,
+      60.0,
+    );
+
+    // Rayon des coins
+    double cornerRadius = 15.0;
+
+    // 4. Peinture
     Paint linkPaint = Paint()
       ..color = arrowColor
       ..style = PaintingStyle.stroke
       ..strokeWidth = lineThickness
       ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round; // Important pour les jointures douces
+      ..strokeJoin = StrokeJoin.round;
 
-    // 4. Calcul du chemin arrondi
-    // On définit le sommet de l'arche
+    // 5. Calcul du chemin arrondi
     double topY = startY - archHeight;
-
-    // Direction : 1 si on va vers la droite, -1 vers la gauche
     double direction = (targetX > startX) ? 1.0 : -1.0;
-
-    // SÉCURITÉ : Si la distance entre les livres est trop petite,
-    // on réduit le rayon pour ne pas que les courbes se croisent.
-    double distanceHorizontale = (targetX - startX).abs();
     double safeRadius = min(cornerRadius, distanceHorizontale / 2);
 
     Path path = Path();
     path.moveTo(startX, startY);
 
-    // A. Montée verticale jusqu'au début de l'arrondi
+    // Montée
     path.lineTo(startX, topY + safeRadius);
 
-    // B. Premier virage (Courbe de Bézier)
-    // Point de contrôle : l'angle droit (startX, topY)
-    // Point d'arrivée : début de la ligne horizontale (startX + rayon, topY)
+    // Virage 1
     path.quadraticBezierTo(
       startX,
       topY,
@@ -199,21 +204,19 @@ class OcrPainter extends CustomPainter {
       topY,
     );
 
-    // C. Traversée horizontale jusqu'au début du deuxième arrondi
+    // Traversée
     path.lineTo(targetX - (safeRadius * direction), topY);
 
-    // D. Deuxième virage
-    // Point de contrôle : l'angle droit (targetX, topY)
-    // Point d'arrivée : début de la descente (targetX, topY + rayon)
+    // Virage 2
     path.quadraticBezierTo(targetX, topY, targetX, topY + safeRadius);
 
-    // E. Descente finale
+    // Descente
     path.lineTo(targetX, targetY - 10);
 
-    // 5. Dessin
+    // Dessin
     canvas.drawPath(path, linkPaint);
 
-    // 6. Pointe
+    // Pointe
     _drawArrowHeadDown(canvas, Offset(targetX, targetY - 10), arrowColor);
   }
 
@@ -247,6 +250,7 @@ class OcrPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant OcrPainter oldDelegate) {
     return oldDelegate.recognitions != recognitions ||
-        oldDelegate.scale != scale || oldDelegate.showArrows != showArrows;
+        oldDelegate.scale != scale ||
+        oldDelegate.showArrows != showArrows;
   }
 }
