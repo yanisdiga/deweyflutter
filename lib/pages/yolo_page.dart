@@ -331,6 +331,11 @@ class _YoloPageState extends State<YoloPage> {
           (Match m) => "${m[1]}${m[2]}",
         );
 
+        // --- FILTRAGE STRICT (DEMANDE UTILISATEUR) ---
+        // On ne garde que : Chiffres (0-9), Lettres Majuscules (A-Z), Point (.), Espace ( )
+        // Tout le reste (accents, symboles, minuscules si restantes...) est supprimé.
+        cleanText = cleanText.replaceAll(RegExp(r'[^A-Z0-9. ]'), "");
+
         // --- LOGIQUE DE RECONSTRUCTION ---
 
         // CAS A : Cote FICTION (Commence par une Lettre : R, BD, J, SF...)
