@@ -3,7 +3,7 @@ class DeweyItem implements Comparable<DeweyItem> {
   final String prefix;
   final double number;
   final String cutter;
-  final bool isValid; // <--- NOUVEAU
+  final bool isValid;
 
   DeweyItem({
     required this.isNumeric,

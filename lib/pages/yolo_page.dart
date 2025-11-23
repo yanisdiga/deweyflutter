@@ -26,6 +26,7 @@ class _YoloPageState extends State<YoloPage> {
   List<Recognition> _recognitions = [];
   bool _isBusy = false;
   String _status = "En attente d'image";
+  bool _showArrows = true;
 
   // Paramètres YOLO
   final int _inputSize = 640;
@@ -148,10 +149,16 @@ class _YoloPageState extends State<YoloPage> {
 
     // C. Output
     var outputShape = _interpreter!.getOutputTensor(0).shape;
-    var output = List.filled(
-      outputShape[0] * outputShape[1] * outputShape[2],
-      0.0,
-    ).reshape(outputShape);
+    // outputShape est généralement [1, 6, 8400] pour YOLO OBB (Batch, Channels, Anchors)
+
+    // CORRECTION : On génère la liste imbriquée directement au lieu d'utiliser reshape
+    // Cela crée une structure [1][Channels][Anchors] remplie de 0.0
+    var output = List.generate(outputShape[0], (batch) {
+      return List.generate(outputShape[1], (channel) {
+        return List.filled(outputShape[2], 0.0);
+      });
+    });
+
     _interpreter!.run(input, output);
 
     // D. Decoding
@@ -401,125 +408,168 @@ class _YoloPageState extends State<YoloPage> {
   void _checkShelfOrder() {
     if (_recognitions.isEmpty) return;
 
-    // 1. Parsing de tout le monde
-    List<DeweyItem?> allItems = _recognitions
+    // 1. Parsing
+    List<DeweyItem> allItems = _recognitions
         .map((r) => _parseDewey(r.text))
         .toList();
 
-    // 2. Création d'une liste de CANDIDATS VALIDES
+    // 2. Candidats Valides (Liste verte potentielle)
     List<MapEntry<int, DeweyItem>> candidates = [];
-
     for (int i = 0; i < allItems.length; i++) {
-      var item = allItems[i];
-      // On ne garde que ceux qui existent ET qui sont valides
-      if (item != null && item.isValid) {
-        candidates.add(MapEntry(i, item));
-      }
+      if (allItems[i].isValid) candidates.add(MapEntry(i, allItems[i]));
     }
 
-    // 3. Algorithme LIS (Longest Increasing Subsequence)
-    int n = candidates.length;
-    List<int> L = List.filled(n, 1);
-    List<int> P = List.filled(n, -1);
+    // 3. LIS (Algorithme de tri - Plus longue sous-suite croissante)
+    Set<int> validOriginalIndices = {};
+    List<MapEntry<int, DeweyItem>> validSequence =
+        []; // La liste verte ordonnée
 
-    for (int i = 0; i < n; i++) {
-      for (int j = 0; j < i; j++) {
-        if (candidates[i].value.compareTo(candidates[j].value) >= 0) {
-          if (L[j] + 1 > L[i]) {
-            L[i] = L[j] + 1;
-            P[i] = j;
+    if (candidates.isNotEmpty) {
+      int n = candidates.length;
+      List<int> L = List.filled(n, 1);
+      List<int> P = List.filled(n, -1);
+
+      for (int i = 0; i < n; i++) {
+        for (int j = 0; j < i; j++) {
+          if (candidates[i].value.compareTo(candidates[j].value) >= 0) {
+            if (L[j] + 1 > L[i]) {
+              L[i] = L[j] + 1;
+              P[i] = j;
+            }
           }
         }
       }
-    }
 
-    // 4. Retrouver la meilleure chaîne
-    int maxLength = 0;
-    int endIndex = -1;
-    for (int i = 0; i < n; i++) {
-      if (L[i] > maxLength) {
-        maxLength = L[i];
-        endIndex = i;
+      int maxLength = 0;
+      int endIndex = -1;
+      for (int i = 0; i < n; i++) {
+        if (L[i] > maxLength) {
+          maxLength = L[i];
+          endIndex = i;
+        }
       }
+
+      // Reconstruction de la chaîne valide
+      while (endIndex != -1) {
+        validOriginalIndices.add(candidates[endIndex].key);
+        validSequence.add(candidates[endIndex]);
+        endIndex = P[endIndex];
+      }
+      // On remet dans l'ordre croissant (car reconstruit à l'envers)
+      validSequence = validSequence.reversed.toList();
     }
 
-    Set<int> validOriginalIndices = {};
-    while (endIndex != -1) {
-      validOriginalIndices.add(candidates[endIndex].key);
-      endIndex = P[endIndex];
-    }
-
-    // 5. Application du verdict + Construction du LOG
+    // 4. Calcul des suggestions & Construction du Log
     StringBuffer debugLog = StringBuffer();
-    debugLog.writeln("\n🔍 --- RÉSUMÉ DU TRI (Ordre détecté) ---");
+    debugLog.writeln("\n🔍 --- RÉSUMÉ DU TRI & SUGGESTIONS ---");
 
     for (int i = 0; i < _recognitions.length; i++) {
       var item = allItems[i];
-      String statusIcon;
-      String debugText = _recognitions[i].text.replaceAll(
-        '\n',
-        ' | ',
-      ); // Aplatir le texte
 
-      if (item == null) {
-        _recognitions[i].isMisplaced = null;
-        _recognitions[i].isInvalid = false;
-        statusIcon = "⚪ ILLISIBLE";
-      } else if (!item.isValid) {
+      // Reset des états
+      _recognitions[i].placementSuggestion = null;
+      String debugText = _recognitions[i].text.replaceAll('\n', ' | ');
+      String statusIcon;
+
+      // A. Cas Invalide
+      if (!item.isValid) {
         _recognitions[i].isMisplaced = null;
         _recognitions[i].isInvalid = true;
-        statusIcon = "🟠 INVALID (Format)";
-      } else if (validOriginalIndices.contains(i)) {
+        statusIcon = "🟠 INVALID";
+      }
+      // B. Cas Bien Placé (Vert)
+      else if (validOriginalIndices.contains(i)) {
         _recognitions[i].isMisplaced = false;
         _recognitions[i].isInvalid = false;
         statusIcon = "🟢 OK";
-      } else {
+      }
+      // C. Cas Intrus (Rouge) -> On calcule la suggestion
+      else {
         _recognitions[i].isMisplaced = true;
         _recognitions[i].isInvalid = false;
-        statusIcon = "🔴 INTRUS (Mal placé)";
+        statusIcon = "🔴 INTRUS";
+
+        // LOGIQUE DE SUGGESTION
+        // On cherche où cet intrus s'insère dans la "validSequence" (les verts)
+        int? targetDisplayNum;
+        String directionArrow = "";
+        String positionText = "";
+
+        if (validSequence.isEmpty) {
+          _recognitions[i].placementSuggestion = "Aucune référence valide";
+        } else {
+          // On cherche le premier livre vert qui est PLUS GRAND que l'intrus
+          int foundIndex = -1;
+
+          for (var validEntry in validSequence) {
+            if (item.compareTo(validEntry.value) < 0) {
+              // L'intrus est plus petit que ce livre vert -> Il va AVANT lui
+              foundIndex = validEntry.key;
+              targetDisplayNum = foundIndex + 1;
+
+              // Si l'index cible est plus petit que l'actuel, on remonte (⬆️), sinon on descend (⬇️)
+              // (Dans une liste : avant = au-dessus)
+              directionArrow = (foundIndex < i) ? "⬆️" : "⬇️";
+              positionText = "Avant le #$targetDisplayNum";
+              break;
+            }
+          }
+
+          // Si on n'a rien trouvé, c'est qu'il est plus grand que TOUS les verts
+          // Il va APRES le dernier vert
+          if (foundIndex == -1) {
+            var lastValid = validSequence.last;
+            targetDisplayNum = lastValid.key + 1;
+
+            directionArrow = (lastValid.key > i) ? "⬇️" : "⬆️";
+            positionText = "Après le #$targetDisplayNum";
+          }
+
+          _recognitions[i].placementSuggestion =
+              "$directionArrow $positionText";
+          statusIcon += " -> ${_recognitions[i].placementSuggestion}";
+        }
       }
 
-      // Ajout de la ligne au log
       debugLog.writeln("   #${i + 1}: [$debugText] -> $statusIcon");
     }
 
-    debugLog.writeln("----------------------------------------\n");
-
-    // 6. Affichage unique dans la console
     print(debugLog.toString());
-
     setState(() {});
   }
 
   // --- PARSER DEWEY (Strict & Robuste) ---
-  DeweyItem? _parseDewey(String text) {
-    // 1. On garde uniquement l'icône d'erreur technique en "Null" (Gris)
-    // Le "?" (rien lu) passe maintenant à la suite pour être marqué "Invalide" (Orange)
-    if (text == "⚠️") return null;
-    if (text.trim().isEmpty) return null;
+  DeweyItem _parseDewey(String text) {
+    // Si erreur technique ou vide -> On renvoie un Item "Invalide" au lieu de null
+    if (text == "⚠️" || text.trim().isEmpty) {
+      return DeweyItem(
+        isNumeric: false,
+        prefix: "?",
+        number: 0,
+        cutter: "",
+        isValid: false, // Sera traité comme invalide (Orange ou Rouge)
+      );
+    }
 
     // 2. Découpage
     List<String> lines = text.split('\n');
+    // ... Le reste de votre code reste identique ...
     String firstLine = lines.isNotEmpty ? lines[0].trim() : "";
     String secondLine = lines.length > 1 ? lines[1].trim() : "";
 
-    // 3. RÈGLE D'OR : IL FAUT UN AUTEUR (2ème ligne)
-    // Si c'est "?", il n'y aura pas de 2ème ligne -> Donc ça rentre ici -> ORANGE
     if (secondLine.length < 2) {
       return DeweyItem(
         isNumeric: false,
         prefix: firstLine.isEmpty ? "?" : firstLine,
         number: 0,
         cutter: "",
-        isValid: false, // <--- ORANGE (Cote incomplète)
+        isValid: false,
       );
     }
 
-    // 4. Détection du type
     bool isFiction = RegExp(r'^[A-Z]').hasMatch(firstLine);
 
     if (isFiction) {
-      // CAS FICTION
       return DeweyItem(
         prefix: firstLine,
         number: 0.0,
@@ -528,15 +578,11 @@ class _YoloPageState extends State<YoloPage> {
         isValid: true,
       );
     } else {
-      // CAS DEWEY
       try {
         double val = double.parse(firstLine);
+        bool valid = (val >= 0 && val < 1000);
 
-        bool valid = true;
-        // Règle A : 000 à 999
-        if (val < 0 || val >= 1000) valid = false;
-
-        // Règle B : 3 chiffres minimum
+        // Vérification : au moins 3 chiffres
         String integerPart = firstLine.split('.')[0];
         if (integerPart.length < 3) valid = false;
 
@@ -548,7 +594,6 @@ class _YoloPageState extends State<YoloPage> {
           isValid: valid,
         );
       } catch (e) {
-        // Si le parsing échoue (ex: caractères bizarres dans le nombre) -> ORANGE
         return DeweyItem(
           isNumeric: true,
           prefix: "",
@@ -560,13 +605,73 @@ class _YoloPageState extends State<YoloPage> {
     }
   }
 
+  void _showSettingsModal() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        // StatefulBuilder permet de mettre à jour le switch visuellement dans la modale
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter setModalState) {
+            return Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    "Paramètres d'affichage",
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 20),
+                  SwitchListTile(
+                    title: const Text("Afficher les flèches de tri"),
+                    subtitle: const Text(
+                      "Dessine les liens vers la position correcte",
+                    ),
+                    secondary: const Icon(
+                      Icons.compare_arrows,
+                      color: Colors.indigo,
+                    ),
+                    value: _showArrows,
+                    activeColor: Colors.indigo,
+                    onChanged: (bool value) {
+                      // 1. Mise à jour visuelle du switch dans la modale
+                      setModalState(() {
+                        _showArrows = value;
+                      });
+                      // 2. Mise à jour de l'écran principal (YoloPage)
+                      this.setState(() {});
+                    },
+                  ),
+                  // Vous pourrez ajouter d'autres options ici plus tard...
+                  const SizedBox(height: 20),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("Scanner Dewey (YOLO + ML Kit)"),
+        title: const Text("Scanner Dewey"),
         backgroundColor: Colors.indigo,
         foregroundColor: Colors.white,
+        actions: [
+          // AJOUT DU BOUTON PARAMÈTRE ICI
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: "Paramètres",
+            onPressed: _showSettingsModal,
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -612,6 +717,7 @@ class _YoloPageState extends State<YoloPage> {
                                         constraints.maxHeight,
                                       ),
                                       scale: _currentScale,
+                                      showArrows: _showArrows,
                                     ),
                                     child: const SizedBox.expand(),
                                   ),
@@ -692,7 +798,10 @@ class _YoloPageState extends State<YoloPage> {
                                       child: Column(
                                         crossAxisAlignment:
                                             CrossAxisAlignment.start,
+                                        mainAxisAlignment:
+                                            MainAxisAlignment.center,
                                         children: [
+                                          // 1. Badge du Numéro
                                           Container(
                                             padding: const EdgeInsets.symmetric(
                                               horizontal: 8,
@@ -701,35 +810,98 @@ class _YoloPageState extends State<YoloPage> {
                                             decoration: BoxDecoration(
                                               color: Colors.indigo,
                                               borderRadius:
-                                                  BorderRadius.circular(12),
+                                                  BorderRadius.circular(4),
                                             ),
                                             child: Text(
-                                              "Cote #${index + 1}",
+                                              "Livre #${index + 1}",
                                               style: const TextStyle(
                                                 color: Colors.white,
-                                                fontSize: 12,
+                                                fontSize: 11,
                                                 fontWeight: FontWeight.bold,
                                               ),
                                             ),
                                           ),
-                                          const SizedBox(height: 5),
+                                          const SizedBox(height: 6),
+
+                                          // 2. Le Texte lu (Cote)
                                           Text(
-                                            rec.text.isEmpty
-                                                ? "Lecture..."
-                                                : rec.text,
+                                            rec.text.isEmpty ? "..." : rec.text,
                                             style: const TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 18,
+                                              fontWeight: FontWeight.w900,
+                                              fontSize:
+                                                  16, // Un peu plus petit pour gérer les longs textes
+                                              color: Colors.black87,
                                             ),
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
                                           ),
-                                          const SizedBox(height: 5),
-                                          Text(
-                                            "Confiance YOLO: ${(rec.score * 100).toInt()}%",
-                                            style: TextStyle(
-                                              color: Colors.grey[600],
-                                              fontSize: 12,
+
+                                          // 3. ZONE D'ACTION (Si mal placé)
+                                          if (rec.placementSuggestion != null)
+                                            Container(
+                                              margin: const EdgeInsets.only(
+                                                top: 8,
+                                              ),
+                                              padding: const EdgeInsets.all(8),
+                                              decoration: BoxDecoration(
+                                                color: Colors
+                                                    .red
+                                                    .shade50, // Fond rouge très clair
+                                                border: Border.all(
+                                                  color: Colors.red.shade300,
+                                                ),
+                                                borderRadius:
+                                                    BorderRadius.circular(6),
+                                              ),
+                                              child: Row(
+                                                children: [
+                                                  // L'icône change selon que c'est INVALID ou INTRUS
+                                                  Icon(
+                                                    Icons
+                                                        .move_up_rounded, // Icône de déplacement
+                                                    color: Colors.red.shade700,
+                                                    size: 20,
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Expanded(
+                                                    child: Text(
+                                                      rec.placementSuggestion!, // ex: "⬇️ Avant le #10"
+                                                      style: TextStyle(
+                                                        color:
+                                                            Colors.red.shade900,
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                        fontSize: 13,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            )
+                                          // 4. Info confiance (Si pas de suggestion d'erreur)
+                                          else
+                                            Padding(
+                                              padding: const EdgeInsets.only(
+                                                top: 6,
+                                              ),
+                                              child: Row(
+                                                children: [
+                                                  Icon(
+                                                    Icons.analytics_outlined,
+                                                    size: 14,
+                                                    color: Colors.grey[600],
+                                                  ),
+                                                  const SizedBox(width: 4),
+                                                  Text(
+                                                    "Confiance: ${(rec.score * 100).toInt()}%",
+                                                    style: TextStyle(
+                                                      color: Colors.grey[600],
+                                                      fontSize: 12,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
                                             ),
-                                          ),
                                         ],
                                       ),
                                     ),

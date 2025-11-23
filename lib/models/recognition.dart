@@ -7,7 +7,8 @@ class Recognition {
   
   bool? isMisplaced; // true=Rouge, false=Vert
   bool isInvalid;    // <--- NOUVEAU : true=Orange (Format incorrect)
-
+  String? placementSuggestion;
+  
   Recognition(
     this.x1,
     this.y1,
