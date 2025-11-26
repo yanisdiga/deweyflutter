@@ -66,7 +66,8 @@ flutter:
   uses-material-design: true
 
   assets:
-    - assets/models/book_label_obb_s2_float32.tflite
+    - assets/models/best_n_float32.tflite
+    # - assets/models/book_label_obb_s2_float32.tflite
     - assets/models/det_v4_ch.onnx
     - assets/models/rec_v4_en.onnx
     - assets/en_dict.txt

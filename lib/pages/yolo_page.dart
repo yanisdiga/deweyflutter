@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -29,7 +30,8 @@ class _YoloPageState extends State<YoloPage> {
   bool _showArrows = true;
 
   // Paramètres YOLO
-  final int _inputSize = 640;
+  final int _inputSize = 1024;
+  final double _sliceOverlap = 0.20; // 20% de chevauchement
   final double _confThreshold = 0.25;
   final double _iouThreshold = 0.45;
 
@@ -67,7 +69,7 @@ class _YoloPageState extends State<YoloPage> {
   Future<void> _loadYoloModel() async {
     try {
       _interpreter = await Interpreter.fromAsset(
-        'assets/models/book_label_obb_s2_float32.tflite',
+        'assets/models/best_n_float32.tflite',
       );
       setState(() => _status = "Modèle YOLO prêt");
     } catch (e) {
@@ -94,7 +96,11 @@ class _YoloPageState extends State<YoloPage> {
       // Le décodage peut être long, l'interface est maintenant vide en attendant
       final file = File(pickedFile.path);
       final bytes = await file.readAsBytes();
+
+      Stopwatch decodingWatch = Stopwatch()..start();
       final decoded = img.decodeImage(bytes);
+      decodingWatch.stop();
+      print("⏱️ Décodage Image : ${decodingWatch.elapsedMilliseconds} ms");
 
       setState(() {
         _originalImage = decoded;
@@ -108,120 +114,221 @@ class _YoloPageState extends State<YoloPage> {
     }
   }
 
-  Future<void> _runYoloInference(img.Image image) async {
+  Future<void> _runYoloInference(img.Image originalImage) async {
     if (_interpreter == null) return;
-    setState(() => _isBusy = true);
+    setState(() => _status = "Découpage et Analyse (Slicing)...");
 
-    // A. Letterboxing
-    double ratioX = _inputSize / image.width;
-    double ratioY = _inputSize / image.height;
-    double scale = min(ratioX, ratioY);
+    Stopwatch totalWatch = Stopwatch()..start();
+    Stopwatch slicingWatch = Stopwatch();
+    Stopwatch inferenceWatch = Stopwatch();
 
-    int newWidth = (image.width * scale).round();
-    int newHeight = (image.height * scale).round();
+    List<Recognition> allDetections = [];
 
-    img.Image resized = img.copyResize(
-      image,
-      width: newWidth,
-      height: newHeight,
+    // 1. Calcul de la grille de découpage
+    int imgW = originalImage.width;
+    int imgH = originalImage.height;
+
+    // Taille du saut (stride) = taille tuile - overlap
+    int stride = (_inputSize * (1 - _sliceOverlap)).toInt();
+
+    // On boucle sur l'image par tuiles
+    for (int y = 0; y < imgH; y += stride) {
+      for (int x = 0; x < imgW; x += stride) {
+        // Ajustement pour ne pas dépasser l'image sur les bords droits/bas
+        int sliceW = min(_inputSize, imgW - x);
+        int sliceH = min(_inputSize, imgH - y);
+
+        // On saute les bouts d'images trop petits (optionnel, mais évite le bruit)
+        if (sliceW < _inputSize * 0.5 || sliceH < _inputSize * 0.5) continue;
+
+        // 2. Extraction de la tuile
+        slicingWatch.start();
+        img.Image slice = img.copyCrop(
+          originalImage,
+          x: x,
+          y: y,
+          width: sliceW,
+          height: sliceH,
+        );
+        slicingWatch.stop();
+
+        // 3. Inférence sur UNE tuile
+        List<Recognition> sliceResults = await _inferSingleSlice(
+          slice,
+          x,
+          y,
+          slicingWatch,
+          inferenceWatch,
+        );
+        allDetections.addAll(sliceResults);
+      }
+    }
+    totalWatch.stop();
+    print("⏱️ Total Boucle : ${totalWatch.elapsedMilliseconds} ms");
+    print(
+      "   👉 Dont Slicing/Pre-process : ${slicingWatch.elapsedMilliseconds} ms",
     );
-    img.Image letterboxedImage = img.Image(
-      width: _inputSize,
-      height: _inputSize,
-    );
-    img.fill(letterboxedImage, color: img.ColorRgb8(114, 114, 114));
+    print("   👉 Dont Inférence AI : ${inferenceWatch.elapsedMilliseconds} ms");
 
-    int dx = (_inputSize - newWidth) ~/ 2;
-    int dy = (_inputSize - newHeight) ~/ 2;
-    img.compositeImage(letterboxedImage, resized, dstX: dx, dstY: dy);
+    // 4. Nettoyage global (NMS sur l'ensemble des résultats recollés)
+    // C'est vital car une étiquette peut être détectée 2 fois (dans le chevauchement)
+    Stopwatch nmsWatch = Stopwatch()..start();
+    List<Recognition> finalRecognitions = BoxUtils.nms(
+      allDetections,
+      0.45,
+    ); // IoU un peu plus strict
 
-    // B. Input
-    var input = List.generate(
-      1,
-      (i) => List.generate(
-        _inputSize,
-        (y) => List.generate(_inputSize, (x) {
-          var pixel = letterboxedImage.getPixel(x, y);
-          return [pixel.r / 255.0, pixel.g / 255.0, pixel.b / 255.0];
-        }),
-      ),
-    );
+    // 5. Tri
+    finalRecognitions = BoxUtils.sortByReadingOrder(finalRecognitions);
+    nmsWatch.stop();
+    print("⏱️ NMS & Tri : ${nmsWatch.elapsedMilliseconds} ms");
 
-    // C. Output
-    var outputShape = _interpreter!.getOutputTensor(0).shape;
-    // outputShape est généralement [1, 6, 8400] pour YOLO OBB (Batch, Channels, Anchors)
-
-    // CORRECTION : On génère la liste imbriquée directement au lieu d'utiliser reshape
-    // Cela crée une structure [1][Channels][Anchors] remplie de 0.0
-    var output = List.generate(outputShape[0], (batch) {
-      return List.generate(outputShape[1], (channel) {
-        return List.filled(outputShape[2], 0.0);
-      });
+    setState(() {
+      _recognitions = finalRecognitions;
+      _status = "${finalRecognitions.length} étiquettes trouvées.";
     });
 
-    _interpreter!.run(input, output);
+    if (finalRecognitions.isNotEmpty) {
+      await _performOCR(originalImage, finalRecognitions);
+    }
+  }
 
-    // D. Decoding
-    List<Recognition> rawRecognitions = [];
-    int numAnchors = outputShape[2];
+  // Nouvelle méthode pour traiter UNE seule tuile
+  Future<List<Recognition>> _inferSingleSlice(
+    img.Image slice,
+    int offsetX,
+    int offsetY,
+    Stopwatch slicingWatch,
+    Stopwatch inferenceWatch,
+  ) async {
+    // A. Letterboxing (Préparer l'image carrée 1024x1024 avec bords gris)
+    slicingWatch.start();
 
-    for (int i = 0; i < numAnchors; i++) {
-      double score = output[0][4][i];
-      if (score > _confThreshold) {
-        double cx = output[0][0][i] * _inputSize;
-        double cy = output[0][1][i] * _inputSize;
-        double w = output[0][2][i] * _inputSize;
-        double h = output[0][3][i] * _inputSize;
-        double angle = output[0][5][i];
+    double scale = min(_inputSize / slice.width, _inputSize / slice.height);
+    int newW = (slice.width * scale).round();
+    int newH = (slice.height * scale).round();
 
-        double cosA = cos(angle).abs();
-        double sinA = sin(angle).abs();
-        double localW = w * cosA + h * sinA;
-        double localH = w * sinA + h * cosA;
+    img.Image resizedSlice = img.copyResize(slice, width: newW, height: newH);
+    img.Image inputImage = img.Image(width: _inputSize, height: _inputSize);
+    img.fill(inputImage, color: img.ColorRgb8(114, 114, 114));
 
-        double x1_640 = cx - (localW / 2);
-        double y1_640 = cy - (localH / 2);
-        double x2_640 = cx + (localW / 2);
-        double y2_640 = cy + (localH / 2);
+    int dx = (_inputSize - newW) ~/ 2;
+    int dy = (_inputSize - newH) ~/ 2;
+    img.compositeImage(inputImage, resizedSlice, dstX: dx, dstY: dy);
 
-        double x1 = (x1_640 - dx) / scale;
-        double y1 = (y1_640 - dy) / scale;
-        double x2 = (x2_640 - dx) / scale;
-        double y2 = (y2_640 - dy) / scale;
+    // B. Conversion en Float32 List (Normalisation 0-1) - OPTIMISÉ
+    Float32List inputBytes = Float32List(1 * _inputSize * _inputSize * 3);
+    int pixelIndex = 0;
 
-        rawRecognitions.add(Recognition(x1, y1, x2, y2, score));
+    for (int y = 0; y < _inputSize; y++) {
+      for (int x = 0; x < _inputSize; x++) {
+        var p = inputImage.getPixel(x, y);
+        inputBytes[pixelIndex++] = p.r / 255.0;
+        inputBytes[pixelIndex++] = p.g / 255.0;
+        inputBytes[pixelIndex++] = p.b / 255.0;
       }
     }
 
-    // E. Nettoyage via BoxUtils
-    List<Recognition> nmsRecognitions = BoxUtils.nms(
-      rawRecognitions,
-      _iouThreshold,
-    );
-    List<Recognition> sortedRecognitions = BoxUtils.sortByReadingOrder(
-      nmsRecognitions,
-    );
+    // On reshape pour correspondre à [1, 1024, 1024, 3]
+    var inputTensor = inputBytes.reshape([1, _inputSize, _inputSize, 3]);
 
-    setState(() {
-      _recognitions = sortedRecognitions;
-      _status =
-          "${sortedRecognitions.length} zones détectées. Lecture ML Kit...";
-    });
+    // C. Output Tensors
+    var outputShape = _interpreter!.getOutputTensor(0).shape;
 
-    if (sortedRecognitions.isNotEmpty) {
-      await _performOCR(image, sortedRecognitions);
-    } else {
-      setState(() {
-        _isBusy = false;
-        _status = "Aucune cote trouvée";
-      });
+    var outputBuffer = List.filled(
+      outputShape[0] * outputShape[1] * outputShape[2],
+      0.0,
+    ).reshape([outputShape[0], outputShape[1], outputShape[2]]);
+
+    slicingWatch.stop(); // Fin prépa
+
+    inferenceWatch.start(); // Début Inférence
+    _interpreter!.run(inputTensor, outputBuffer);
+    inferenceWatch.stop(); // Fin Inférence
+
+    // D. Decoding OBB
+    // Le décodage est aussi du post-process CPU, on peut le compter dans slicingWatch ou un autre,
+    // mais ici on va le mettre dans slicingWatch pour simplifier (c'est du CPU pur)
+    slicingWatch.start();
+
+    List<Recognition> sliceRecs = [];
+    int numAnchors = outputShape[2]; // ex: 21504
+
+    for (int i = 0; i < numAnchors; i++) {
+      // Structure supposée : [cx, cy, w, h, score, angle]
+      // ATTENTION: Vérifiez l'indexation de votre modèle exporté.
+      // Souvent score est en 4 et angle en 5, ou l'inverse selon version ultralytics.
+      double score = outputBuffer[0][4][i];
+
+      if (score > _confThreshold) {
+        double cx = outputBuffer[0][0][i] * _inputSize;
+        double cy = outputBuffer[0][1][i] * _inputSize;
+        double w = outputBuffer[0][2][i] * _inputSize;
+        double h = outputBuffer[0][3][i] * _inputSize;
+
+        double angle = outputBuffer[0][5][i];
+
+        // 1. Calcul des 4 coins dans le repère de la TUILE (avant resize letterbox)
+        // Matrice de rotation 2D
+        double c = cos(angle);
+        double s = sin(angle);
+
+        // Les 4 coins relatifs au centre (w, h)
+        List<Point<double>> localPoints = [
+          Point(-w / 2, -h / 2),
+          Point(w / 2, -h / 2),
+          Point(w / 2, h / 2),
+          Point(-w / 2, h / 2),
+        ];
+
+        List<Point<double>> rotatedPoints = [];
+        double minX = double.infinity, minY = double.infinity;
+        double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+
+        for (var p in localPoints) {
+          // Rotation + Translation au centre cx, cy
+          double rotX = p.x * c - p.y * s + cx;
+          double rotY = p.x * s + p.y * c + cy;
+
+          // Annulation du Letterboxing (dx, dy) et du Scale
+          double finalX = (rotX - dx) / scale;
+          double finalY = (rotY - dy) / scale;
+
+          // Ajout de l'offset de la tuile dans l'image globale
+          finalX += offsetX;
+          finalY += offsetY;
+
+          rotatedPoints.add(Point(finalX, finalY));
+
+          // Mise à jour AABB pour le NMS
+          if (finalX < minX) minX = finalX;
+          if (finalY < minY) minY = finalY;
+          if (finalX > maxX) maxX = finalX;
+          if (finalY > maxY) maxY = finalY;
+        }
+
+        sliceRecs.add(
+          Recognition(
+            minX,
+            minY,
+            maxX,
+            maxY,
+            score,
+            renderPoints: rotatedPoints,
+            angle: angle,
+          ),
+        );
+      }
     }
+    slicingWatch.stop(); // Fin Decoding
+    return sliceRecs;
   }
 
   Future<void> _performOCR(
     img.Image originalImage,
     List<Recognition> boxes,
   ) async {
+    Stopwatch ocrWatch = Stopwatch()..start();
     final tempDir = await getTemporaryDirectory();
 
     for (var i = 0; i < boxes.length; i++) {
@@ -418,6 +525,9 @@ class _YoloPageState extends State<YoloPage> {
     }
 
     _checkShelfOrder();
+    ocrWatch.stop();
+    print("⏱️ Total OCR : ${ocrWatch.elapsedMilliseconds} ms");
+
     setState(() {
       _isBusy = false;
       _status = "Terminé : ${boxes.length} résultats";

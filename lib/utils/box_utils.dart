@@ -17,7 +17,10 @@ class BoxUtils {
   // Non-Maximum Suppression (Supprime les doublons de boîtes)
   static List<Recognition> nms(List<Recognition> boxes, double iouThreshold) {
     if (boxes.isEmpty) return [];
+    
+    // On trie par score décroissant
     boxes.sort((a, b) => b.score.compareTo(a.score));
+    
     List<Recognition> selected = [];
     List<bool> active = List.filled(boxes.length, true);
 
@@ -27,7 +30,10 @@ class BoxUtils {
         for (int j = i + 1; j < boxes.length; j++) {
           if (active[j]) {
             double iou = calculateIoU(boxes[i], boxes[j]);
-            if (iou > iouThreshold) active[j] = false;
+            // Si trop de chevauchement, on supprime celui avec le score le plus bas
+            if (iou > iouThreshold) {
+              active[j] = false;
+            }
           }
         }
       }

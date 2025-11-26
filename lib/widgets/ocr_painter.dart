@@ -1,14 +1,12 @@
 import 'package:flutter/material.dart';
+import 'dart:math'; // Nécessaire pour min() et Point
 import '../models/recognition.dart';
-import 'dart:math'; // Nécessaire pour min()
 
 class OcrPainter extends CustomPainter {
   final List<Recognition> recognitions;
   final Size imageSize;
   final Size widgetSize;
   final double scale;
-
-  // 1. AJOUT DU PARAMÈTRE
   final bool showArrows;
 
   OcrPainter({
@@ -28,6 +26,7 @@ class OcrPainter extends CustomPainter {
     double ratioImage = imageSize.width / imageSize.height;
     double ratioScreen = size.width / size.height;
 
+    // Logique standard BoxFit.contain
     if (ratioImage > ratioScreen) {
       renderedWidth = size.width;
       renderedHeight = size.width / ratioImage;
@@ -47,11 +46,12 @@ class OcrPainter extends CustomPainter {
     fontSize = fontSize.clamp(10.0, 30.0);
 
     // -----------------------------------------------------------
-    // 2. DESSIN DES CADRES ET NUMÉROS
+    // 2. DESSIN DES CADRES (RECTANGLES OU OBB) ET NUMÉROS
     // -----------------------------------------------------------
     for (var i = 0; i < recognitions.length; i++) {
       var rec = recognitions[i];
 
+      // Choix de la couleur
       Color boxColor;
       if (rec.isInvalid) {
         boxColor = Colors.orange;
@@ -68,12 +68,38 @@ class OcrPainter extends CustomPainter {
         ..style = PaintingStyle.stroke
         ..strokeWidth = strokeWidth;
 
-      double left = (rec.x1 * scaleX) + offsetX;
-      double top = (rec.y1 * scaleY) + offsetY;
-      double right = (rec.x2 * scaleX) + offsetX;
-      double bottom = (rec.y2 * scaleY) + offsetY;
+      // --- LOGIQUE HYBRIDE : OBB (Polygone) ou AABB (Rectangle) ---
+      
+      if (rec.renderPoints.isNotEmpty) {
+        // CAS OBB : On a les 4 points précis, on dessine le polygone orienté
+        Path path = Path();
+        
+        // Point 1
+        double startX = (rec.renderPoints[0].x * scaleX) + offsetX;
+        double startY = (rec.renderPoints[0].y * scaleY) + offsetY;
+        path.moveTo(startX, startY);
 
-      canvas.drawRect(Rect.fromLTRB(left, top, right, bottom), boxPaint);
+        // Points 2, 3, 4
+        for (int j = 1; j < rec.renderPoints.length; j++) {
+          double px = (rec.renderPoints[j].x * scaleX) + offsetX;
+          double py = (rec.renderPoints[j].y * scaleY) + offsetY;
+          path.lineTo(px, py);
+        }
+        path.close(); // Fermer la forme
+        canvas.drawPath(path, boxPaint);
+      } else {
+        // CAS FALLBACK : On n'a que x1, y1, x2, y2 (Rectangle droit)
+        double left = (rec.x1 * scaleX) + offsetX;
+        double top = (rec.y1 * scaleY) + offsetY;
+        double right = (rec.x2 * scaleX) + offsetX;
+        double bottom = (rec.y2 * scaleY) + offsetY;
+        canvas.drawRect(Rect.fromLTRB(left, top, right, bottom), boxPaint);
+      }
+
+      // --- DESSIN DU NUMÉRO ---
+      // On place le numéro au-dessus du coin haut-gauche de la boîte englobante
+      double labelX = (rec.x1 * scaleX) + offsetX;
+      double labelY = (rec.y1 * scaleY) + offsetY;
 
       TextSpan span = TextSpan(
         style: TextStyle(
@@ -95,7 +121,7 @@ class OcrPainter extends CustomPainter {
         textDirection: TextDirection.ltr,
       );
       tp.layout();
-      tp.paint(canvas, Offset(left, top - (fontSize + 4)));
+      tp.paint(canvas, Offset(labelX, labelY - (fontSize + 4)));
     }
 
     // -----------------------------------------------------------
@@ -115,7 +141,7 @@ class OcrPainter extends CustomPainter {
             offsetX,
             offsetY,
             strokeWidth,
-            i, // On passe l'index pour varier les couleurs/hauteurs
+            i,
           );
         }
       }
@@ -132,13 +158,9 @@ class OcrPainter extends CustomPainter {
     double offsetX,
     double offsetY,
     double baseStrokeWidth,
-    int index, // Index de l'élément courant
+    int index,
   ) {
-    // ============================================================
-    // 🛠️ ZONE DE CONFIGURATION DYNAMIQUE
-    // ============================================================
-
-    // 1. Parsing
+    // 1. Parsing de la suggestion (ex: "#5")
     String suggestion = intruder.placementSuggestion!;
     final match = RegExp(r'#(\d+)').firstMatch(suggestion);
     if (match == null) return;
@@ -149,7 +171,7 @@ class OcrPainter extends CustomPainter {
     if (targetIndex < 0 || targetIndex >= allRecs.length) return;
     Recognition target = allRecs[targetIndex];
 
-    // 2. Coordonnées
+    // 2. Coordonnées (On utilise le centre des bounding boxes pour l'origine)
     double startX = ((intruder.x1 + intruder.x2) / 2 * scaleX) + offsetX;
     double startY = (intruder.y1 * scaleY) + offsetY;
 
@@ -158,23 +180,13 @@ class OcrPainter extends CustomPainter {
     double targetX = (targetXRaw * scaleX) + offsetX;
     double targetY = (target.y1 * scaleY) + offsetY;
 
-    // 3. CONFIGURATION VISUELLE (COULEUR & HAUTEUR)
-
-    // A. Couleur Unique (DeepPurple pour être visible mais sobre)
+    // 3. Configuration Visuelle
     final Color arrowColor = Colors.red;
     final double lineThickness = baseStrokeWidth * 1.0;
 
-    // B. Hauteur basée sur la distance horizontale
-    // Plus c'est loin, plus c'est haut.
+    // Hauteur de l'arche dynamique
     double distanceHorizontale = (targetX - startX).abs();
-
-    // Formule : Base 30 + 15% de la distance, plafonné à 120
-    final double archHeight = (30.0 + distanceHorizontale * 0.05).clamp(
-      30.0,
-      60.0,
-    );
-
-    // Rayon des coins
+    final double archHeight = (30.0 + distanceHorizontale * 0.05).clamp(30.0, 60.0);
     double cornerRadius = 15.0;
 
     // 4. Peinture
@@ -185,38 +197,22 @@ class OcrPainter extends CustomPainter {
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
 
-    // 5. Calcul du chemin arrondi
+    // 5. Calcul du chemin
     double topY = startY - archHeight;
     double direction = (targetX > startX) ? 1.0 : -1.0;
     double safeRadius = min(cornerRadius, distanceHorizontale / 2);
 
     Path path = Path();
     path.moveTo(startX, startY);
+    path.lineTo(startX, topY + safeRadius); // Montée
+    path.quadraticBezierTo(startX, topY, startX + (safeRadius * direction), topY); // Virage 1
+    path.lineTo(targetX - (safeRadius * direction), topY); // Traversée
+    path.quadraticBezierTo(targetX, topY, targetX, topY + safeRadius); // Virage 2
+    path.lineTo(targetX, targetY - 10); // Descente vers la cible
 
-    // Montée
-    path.lineTo(startX, topY + safeRadius);
-
-    // Virage 1
-    path.quadraticBezierTo(
-      startX,
-      topY,
-      startX + (safeRadius * direction),
-      topY,
-    );
-
-    // Traversée
-    path.lineTo(targetX - (safeRadius * direction), topY);
-
-    // Virage 2
-    path.quadraticBezierTo(targetX, topY, targetX, topY + safeRadius);
-
-    // Descente
-    path.lineTo(targetX, targetY - 10);
-
-    // Dessin
     canvas.drawPath(path, linkPaint);
 
-    // Pointe
+    // Pointe de la flèche
     _drawArrowHeadDown(canvas, Offset(targetX, targetY - 10), arrowColor);
   }
 
@@ -225,10 +221,6 @@ class OcrPainter extends CustomPainter {
       ..color = color
       ..style = PaintingStyle.fill;
 
-    // ---------------------------------------------------------
-    // 🛠️ RÉGLAGE DE LA TAILLE
-    // C'était 8.0 avant. Essayez 5.0 (moyen) ou 4.0 (petit)
-    // ---------------------------------------------------------
     double arrowSize = 5.0;
 
     Path head = Path();
@@ -237,7 +229,6 @@ class OcrPainter extends CustomPainter {
     head.lineTo(tip.dx + arrowSize, tip.dy - arrowSize);
     head.close();
 
-    // Petite ombre noire pour la pointe aussi
     Paint shadowPaint = Paint()
       ..color = Colors.black
       ..style = PaintingStyle.stroke
