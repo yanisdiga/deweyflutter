@@ -8,7 +8,6 @@ import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
-// Imports de nos nouveaux fichiers
 import '../models/recognition.dart';
 import '../models/dewey_item.dart';
 import '../widgets/ocr_painter.dart';
@@ -29,13 +28,11 @@ class _YoloPageState extends State<YoloPage> {
   String _status = "En attente d'image";
   bool _showArrows = true;
 
-  // Paramètres YOLO
-  final int _inputSize = 1024;
-  final double _sliceOverlap = 0.20; // 20% de chevauchement
+  // --- PARAMÈTRES SIMPLIFIÉS ---
+  final int _inputSize = 1024; // On passe en 640 pour la vitesse max
   final double _confThreshold = 0.25;
   final double _iouThreshold = 0.45;
 
-  // --- MOTEUR OCR : GOOGLE ML KIT ---
   final TextRecognizer _textRecognizer = TextRecognizer(
     script: TextRecognitionScript.latin,
   );
@@ -51,9 +48,7 @@ class _YoloPageState extends State<YoloPage> {
     _transformController.addListener(() {
       final newScale = _transformController.value.getMaxScaleOnAxis();
       if (newScale != _currentScale) {
-        setState(() {
-          _currentScale = newScale;
-        });
+        setState(() => _currentScale = newScale);
       }
     });
   }
@@ -68,10 +63,11 @@ class _YoloPageState extends State<YoloPage> {
 
   Future<void> _loadYoloModel() async {
     try {
+      // Assure-toi d'avoir exporté ton modèle Nano en 640px !
       _interpreter = await Interpreter.fromAsset(
         'assets/models/best_n_float32.tflite',
       );
-      setState(() => _status = "Modèle YOLO prêt");
+      setState(() => _status = "Modèle prêt");
     } catch (e) {
       print("Erreur modèle YOLO: $e");
       setState(() => _status = "Erreur chargement modèle");
@@ -83,143 +79,60 @@ class _YoloPageState extends State<YoloPage> {
     final pickedFile = await picker.pickImage(source: source);
 
     if (pickedFile != null) {
-      // --- CORRECTION : ON VIDE TOUT IMMÉDIATEMENT ---
       setState(() {
         _isBusy = true;
-        _recognitions = []; // On vide la liste des cotes
-        _image = File(
-          pickedFile.path,
-        ); // On affiche la nouvelle image (chargement)
-        _status = "Décodage de l'image...";
+        _recognitions = [];
+        _image = File(pickedFile.path);
+        _status = "Traitement en cours...";
       });
 
-      // Le décodage peut être long, l'interface est maintenant vide en attendant
-      final file = File(pickedFile.path);
-      final bytes = await file.readAsBytes();
-
-      Stopwatch decodingWatch = Stopwatch()..start();
+      // Décodage sur le thread UI (rapide pour une seule image)
+      // Si trop lent, utiliser compute() mais ici on simplifie
+      final bytes = await File(pickedFile.path).readAsBytes();
       final decoded = img.decodeImage(bytes);
-      decodingWatch.stop();
-      print("⏱️ Décodage Image : ${decodingWatch.elapsedMilliseconds} ms");
-
-      setState(() {
-        _originalImage = decoded;
-        _status = "Analyse YOLO en cours...";
-      });
 
       if (decoded != null) {
-        final oriented = img.bakeOrientation(decoded);
-        await _runYoloInference(oriented);
+        // Gestion de l'orientation EXIF
+        _originalImage = img.bakeOrientation(decoded);
+        await _runYoloDirect(_originalImage!);
       }
     }
   }
 
-  Future<void> _runYoloInference(img.Image originalImage) async {
+  // --- NOUVELLE MÉTHODE UNIQUE (SANS SLICING) ---
+  Future<void> _runYoloDirect(img.Image originalImage) async {
     if (_interpreter == null) return;
-    setState(() => _status = "Découpage et Analyse (Slicing)...");
 
-    Stopwatch totalWatch = Stopwatch()..start();
-    Stopwatch slicingWatch = Stopwatch();
-    Stopwatch inferenceWatch = Stopwatch();
+    Stopwatch watch = Stopwatch()..start();
 
-    List<Recognition> allDetections = [];
-
-    // 1. Calcul de la grille de découpage
-    int imgW = originalImage.width;
-    int imgH = originalImage.height;
-
-    // Taille du saut (stride) = taille tuile - overlap
-    int stride = (_inputSize * (1 - _sliceOverlap)).toInt();
-
-    // On boucle sur l'image par tuiles
-    for (int y = 0; y < imgH; y += stride) {
-      for (int x = 0; x < imgW; x += stride) {
-        // Ajustement pour ne pas dépasser l'image sur les bords droits/bas
-        int sliceW = min(_inputSize, imgW - x);
-        int sliceH = min(_inputSize, imgH - y);
-
-        // On saute les bouts d'images trop petits (optionnel, mais évite le bruit)
-        if (sliceW < _inputSize * 0.5 || sliceH < _inputSize * 0.5) continue;
-
-        // 2. Extraction de la tuile
-        slicingWatch.start();
-        img.Image slice = img.copyCrop(
-          originalImage,
-          x: x,
-          y: y,
-          width: sliceW,
-          height: sliceH,
-        );
-        slicingWatch.stop();
-
-        // 3. Inférence sur UNE tuile
-        List<Recognition> sliceResults = await _inferSingleSlice(
-          slice,
-          x,
-          y,
-          slicingWatch,
-          inferenceWatch,
-        );
-        allDetections.addAll(sliceResults);
-      }
-    }
-    totalWatch.stop();
-    print("⏱️ Total Boucle : ${totalWatch.elapsedMilliseconds} ms");
-    print(
-      "   👉 Dont Slicing/Pre-process : ${slicingWatch.elapsedMilliseconds} ms",
+    // 1. LETTERBOXING (Redimensionnement en gardant le ratio)
+    // On adapte l'image 4000x3000 vers 640x640 avec des bandes grises
+    double scale = min(
+      _inputSize / originalImage.width,
+      _inputSize / originalImage.height,
     );
-    print("   👉 Dont Inférence AI : ${inferenceWatch.elapsedMilliseconds} ms");
+    int newW = (originalImage.width * scale).round();
+    int newH = (originalImage.height * scale).round();
 
-    // 4. Nettoyage global (NMS sur l'ensemble des résultats recollés)
-    // C'est vital car une étiquette peut être détectée 2 fois (dans le chevauchement)
-    Stopwatch nmsWatch = Stopwatch()..start();
-    List<Recognition> finalRecognitions = BoxUtils.nms(
-      allDetections,
-      0.45,
-    ); // IoU un peu plus strict
+    // Resize de l'image entière (c'est l'étape la plus lourde, mais faite 1 seule fois)
+    img.Image resized = img.copyResize(
+      originalImage,
+      width: newW,
+      height: newH,
+    );
 
-    // 5. Tri
-    finalRecognitions = BoxUtils.sortByReadingOrder(finalRecognitions);
-    nmsWatch.stop();
-    print("⏱️ NMS & Tri : ${nmsWatch.elapsedMilliseconds} ms");
-
-    setState(() {
-      _recognitions = finalRecognitions;
-      _status = "${finalRecognitions.length} étiquettes trouvées.";
-    });
-
-    if (finalRecognitions.isNotEmpty) {
-      await _performOCR(originalImage, finalRecognitions);
-    }
-  }
-
-  // Nouvelle méthode pour traiter UNE seule tuile
-  Future<List<Recognition>> _inferSingleSlice(
-    img.Image slice,
-    int offsetX,
-    int offsetY,
-    Stopwatch slicingWatch,
-    Stopwatch inferenceWatch,
-  ) async {
-    // A. Letterboxing (Préparer l'image carrée 1024x1024 avec bords gris)
-    slicingWatch.start();
-
-    double scale = min(_inputSize / slice.width, _inputSize / slice.height);
-    int newW = (slice.width * scale).round();
-    int newH = (slice.height * scale).round();
-
-    img.Image resizedSlice = img.copyResize(slice, width: newW, height: newH);
+    // Création du canvas carré gris
     img.Image inputImage = img.Image(width: _inputSize, height: _inputSize);
     img.fill(inputImage, color: img.ColorRgb8(114, 114, 114));
 
+    // Collage de l'image centrée
     int dx = (_inputSize - newW) ~/ 2;
     int dy = (_inputSize - newH) ~/ 2;
-    img.compositeImage(inputImage, resizedSlice, dstX: dx, dstY: dy);
+    img.compositeImage(inputImage, resized, dstX: dx, dstY: dy);
 
-    // B. Conversion en Float32 List (Normalisation 0-1) - OPTIMISÉ
+    // 2. PRÉPARATION TENSEUR (Float32)
     Float32List inputBytes = Float32List(1 * _inputSize * _inputSize * 3);
     int pixelIndex = 0;
-
     for (int y = 0; y < _inputSize; y++) {
       for (int x = 0; x < _inputSize; x++) {
         var p = inputImage.getPixel(x, y);
@@ -228,52 +141,42 @@ class _YoloPageState extends State<YoloPage> {
         inputBytes[pixelIndex++] = p.b / 255.0;
       }
     }
-
-    // On reshape pour correspondre à [1, 1024, 1024, 3]
     var inputTensor = inputBytes.reshape([1, _inputSize, _inputSize, 3]);
 
-    // C. Output Tensors
+    // 3. PRÉPARATION SORTIE
     var outputShape = _interpreter!.getOutputTensor(0).shape;
+    // Forme attendue : [1, 6, Anchors] ou [1, Anchors, 6] selon export
+    // Ici on suppose [1, 6, 8400] (Standard YOLOv8/11)
 
     var outputBuffer = List.filled(
       outputShape[0] * outputShape[1] * outputShape[2],
       0.0,
     ).reshape([outputShape[0], outputShape[1], outputShape[2]]);
 
-    slicingWatch.stop(); // Fin prépa
-
-    inferenceWatch.start(); // Début Inférence
+    // 4. INFÉRENCE
     _interpreter!.run(inputTensor, outputBuffer);
-    inferenceWatch.stop(); // Fin Inférence
 
-    // D. Decoding OBB
-    // Le décodage est aussi du post-process CPU, on peut le compter dans slicingWatch ou un autre,
-    // mais ici on va le mettre dans slicingWatch pour simplifier (c'est du CPU pur)
-    slicingWatch.start();
-
-    List<Recognition> sliceRecs = [];
-    int numAnchors = outputShape[2]; // ex: 21504
+    // 5. DÉCODAGE DES RÉSULTATS
+    List<Recognition> detections = [];
+    int numAnchors = outputShape[2]; // ex: 8400 en 640px
 
     for (int i = 0; i < numAnchors; i++) {
-      // Structure supposée : [cx, cy, w, h, score, angle]
-      // ATTENTION: Vérifiez l'indexation de votre modèle exporté.
-      // Souvent score est en 4 et angle en 5, ou l'inverse selon version ultralytics.
+      // Lecture [Batch][Channel][Anchor]
       double score = outputBuffer[0][4][i];
 
       if (score > _confThreshold) {
+        // Coordonnées brutes (0-1 ou pixels selon export)
+        // Si ton export onnx2tf sort du 0-1, on multiplie par _inputSize
         double cx = outputBuffer[0][0][i] * _inputSize;
         double cy = outputBuffer[0][1][i] * _inputSize;
         double w = outputBuffer[0][2][i] * _inputSize;
         double h = outputBuffer[0][3][i] * _inputSize;
-
         double angle = outputBuffer[0][5][i];
 
-        // 1. Calcul des 4 coins dans le repère de la TUILE (avant resize letterbox)
-        // Matrice de rotation 2D
+        // Calcul des coins OBB locaux
         double c = cos(angle);
         double s = sin(angle);
 
-        // Les 4 coins relatifs au centre (w, h)
         List<Point<double>> localPoints = [
           Point(-w / 2, -h / 2),
           Point(w / 2, -h / 2),
@@ -281,47 +184,79 @@ class _YoloPageState extends State<YoloPage> {
           Point(-w / 2, h / 2),
         ];
 
-        List<Point<double>> rotatedPoints = [];
+        List<Point<double>> realPoints = [];
         double minX = double.infinity, minY = double.infinity;
         double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
 
         for (var p in localPoints) {
-          // Rotation + Translation au centre cx, cy
+          // Rotation
           double rotX = p.x * c - p.y * s + cx;
           double rotY = p.x * s + p.y * c + cy;
 
-          // Annulation du Letterboxing (dx, dy) et du Scale
+          // ⚠️ IMPORTANT : MAPPING VERS L'IMAGE ORIGINALE ⚠️
+          // On inverse le Letterboxing : (x - dx) / scale
           double finalX = (rotX - dx) / scale;
           double finalY = (rotY - dy) / scale;
 
-          // Ajout de l'offset de la tuile dans l'image globale
-          finalX += offsetX;
-          finalY += offsetY;
+          // --- AJOUT DEBUG ---
+          if (i == 0) {
+            // On affiche juste pour le premier objet pour pas spammer
+            print("--- DEBUG COORDONNÉES ---");
+            print(
+              "Taille Image Originale: ${originalImage.width} x ${originalImage.height}",
+            );
+            print("Input Size: $_inputSize");
+            print("Scale: $scale, dx: $dx, dy: $dy");
+            print("YOLO Raw (cx,cy): $cx, $cy");
+            print("Final Mapped (x,y): $finalX, $finalY");
+            print("-------------------------");
+          }
+          // -------------------
 
-          rotatedPoints.add(Point(finalX, finalY));
+          realPoints.add(Point(finalX, finalY));
 
-          // Mise à jour AABB pour le NMS
           if (finalX < minX) minX = finalX;
           if (finalY < minY) minY = finalY;
           if (finalX > maxX) maxX = finalX;
           if (finalY > maxY) maxY = finalY;
         }
 
-        sliceRecs.add(
+        detections.add(
           Recognition(
             minX,
             minY,
             maxX,
             maxY,
             score,
-            renderPoints: rotatedPoints,
+            renderPoints: realPoints,
             angle: angle,
           ),
         );
       }
     }
-    slicingWatch.stop(); // Fin Decoding
-    return sliceRecs;
+
+    // 6. NMS (Nettoyage des doublons)
+    List<Recognition> finalDetections = BoxUtils.nms(detections, _iouThreshold);
+
+    // 7. TRI
+    finalDetections = BoxUtils.sortByReadingOrder(finalDetections);
+
+    watch.stop();
+    print(
+      "🚀 Temps Inférence + Post-process : ${watch.elapsedMilliseconds} ms",
+    );
+
+    setState(() {
+      _recognitions = finalDetections;
+      _status = "${finalDetections.length} livres détectés";
+    });
+
+    // 8. OCR (Sur l'image originale !)
+    if (finalDetections.isNotEmpty) {
+      await _performOCR(originalImage, finalDetections);
+    } else {
+      setState(() => _isBusy = false);
+    }
   }
 
   Future<void> _performOCR(
