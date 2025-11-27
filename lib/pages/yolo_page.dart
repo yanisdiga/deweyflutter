@@ -378,6 +378,15 @@ class _YoloPageState extends State<YoloPage> {
         // Tout le reste (accents, symboles, minuscules si restantes...) est supprimé.
         cleanText = cleanText.replaceAll(RegExp(r'[^A-Z0-9. ]'), "");
 
+        // 6. Nettoyage spécifique : Titre parasite avant une cote Dewey
+        // Si la chaîne commence par autre chose que des chiffres (ex: "LAVENTURE "),
+        // mais qu'elle est suivie par une séquence Dewey (3 chiffres), on coupe le début.
+        // Regex : ^[^0-9]+  -> Tout ce qui n'est pas un chiffre au début
+        //         (?=\d{3}) -> Qui est suivi (Lookahead) par 3 chiffres
+        cleanText = cleanText.replaceFirst(RegExp(r'^[^0-9]+(?=\d{3})'), "");
+        cleanText = cleanText
+            .trim(); // On nettoie les espaces potentiels laissés au début
+
         // --- LOGIQUE DE RECONSTRUCTION ---
 
         // CAS A : Cote FICTION (Commence par une Lettre : R, BD, J, SF...)
@@ -656,20 +665,34 @@ class _YoloPageState extends State<YoloPage> {
     } else {
       try {
         double val = double.parse(firstLine);
+
+        // Validation de base du nombre (0-999)
         bool valid = (val >= 0 && val < 1000);
 
-        // Vérification : au moins 3 chiffres
+        // Vérification : au moins 3 chiffres pour la classe (ex: "320")
         String integerPart = firstLine.split('.')[0];
         if (integerPart.length < 3) valid = false;
+
+        // --- NOUVELLE RÈGLE : CUTTER "3 ou RIEN" ---
+        // On nettoie les espaces pour compter les vraies lettres (ex: "E L M" = 3)
+        String cutterCheck = secondLine.replaceAll(" ", "");
+
+        // Si le cutter n'est pas vide ET qu'il fait moins de 3 caractères -> INVALID
+        // Ex: "EL" (2) -> Faux. "M" (1) -> Faux. "ELM" (3) -> Vrai. "" (0) -> Vrai.
+        if (cutterCheck.isNotEmpty && cutterCheck.length < 3) {
+          valid = false;
+        }
 
         return DeweyItem(
           prefix: "",
           number: val,
           cutter: secondLine,
           isNumeric: true,
-          isValid: valid,
+          isValid:
+              valid, // Si false, la boîte deviendra ORANGE (status INVALID)
         );
       } catch (e) {
+        // Si le parse du nombre échoue
         return DeweyItem(
           isNumeric: true,
           prefix: "",
