@@ -655,12 +655,26 @@ class _YoloPageState extends State<YoloPage> {
     bool isFiction = RegExp(r'^[A-Z]').hasMatch(firstLine);
 
     if (isFiction) {
+      // LISTE BLANCHE DES PRÉFIXES FICTION VALIDES
+      const validPrefixes = {
+        'R', 'RP', 'RS', 'RJ', 'RD', // Romans
+        'BD', 'BDA', 'BDJ', // Bandes Dessinées
+        'A', 'AJ', 'C', 'CJ', // Albums, Contes
+        'P', 'PJ', 'T', 'TJ', // Poésie, Théâtre
+        'B', 'J', 'SF', // Bio, Jeunesse, Science-Fiction
+        'F', 'FIC', // Anglais / Autres
+      };
+
+      // On nettoie le préfixe pour être sûr (ex: "BD " -> "BD")
+      String cleanPrefix = firstLine.trim().toUpperCase();
+      bool isValidPrefix = validPrefixes.contains(cleanPrefix);
+
       return DeweyItem(
         prefix: firstLine,
         number: 0.0,
         cutter: secondLine,
         isNumeric: false,
-        isValid: true,
+        isValid: isValidPrefix, // True seulement si dans la liste blanche
       );
     } else {
       try {
@@ -680,6 +694,21 @@ class _YoloPageState extends State<YoloPage> {
         // Si le cutter n'est pas vide ET qu'il fait moins de 3 caractères -> INVALID
         // Ex: "EL" (2) -> Faux. "M" (1) -> Faux. "ELM" (3) -> Vrai. "" (0) -> Vrai.
         if (cutterCheck.isNotEmpty && cutterCheck.length < 3) {
+          valid = false;
+        }
+
+        // --- RÈGLES STRICTES ADDITIONNELLES ---
+
+        // 1. Anti-Lettres Isolées : Rejeter "A L ERE" ou "T O T O"
+        // On cherche 2 lettres majuscules séparées par un espace
+        if (RegExp(r'(?:^|\s)[A-Z]\s[A-Z](?:\s|$)').hasMatch(secondLine)) {
+          valid = false;
+        }
+
+        // 2. Anti-Chiffres Intrus : Rejeter "E1RE" ou "TE1ST"
+        // On cherche un chiffre coincé entre deux lettres (ou une lettre et un chiffre, etc.)
+        // Plus globalement : des lettres contenant des chiffres
+        if (RegExp(r'[A-Z]+\d+[A-Z]+').hasMatch(secondLine)) {
           valid = false;
         }
 
