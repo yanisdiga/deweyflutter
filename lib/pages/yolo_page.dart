@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:math';
+import 'package:flutter/foundation.dart'; // Pour compute
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
@@ -63,7 +64,6 @@ class _YoloPageState extends State<YoloPage> {
 
   Future<void> _loadYoloModel() async {
     try {
-      // Assure-toi d'avoir exporté ton modèle Nano en 640px !
       _interpreter = await Interpreter.fromAsset(
         'assets/models/best_n_float32.tflite',
       );
@@ -86,13 +86,16 @@ class _YoloPageState extends State<YoloPage> {
         _status = "Traitement en cours...";
       });
 
-      // Décodage sur le thread UI (rapide pour une seule image)
-      // Si trop lent, utiliser compute() mais ici on simplifie
+      // Petit délai pour laisser l'UI afficher le spinner
+      await Future.delayed(const Duration(milliseconds: 100));
+
       final bytes = await File(pickedFile.path).readAsBytes();
-      final decoded = img.decodeImage(bytes);
+
+      // Décodage dans un Isolate pour ne pas freezer l'UI
+      final decoded = await compute(img.decodeImage, bytes);
 
       if (decoded != null) {
-        // Gestion de l'orientation EXIF
+        // Gestion de l'orientation EXIF (aussi via compute idéalement, mais bakeOrientation est rapide)
         _originalImage = img.bakeOrientation(decoded);
         await _runYoloDirect(_originalImage!);
       }
@@ -166,7 +169,6 @@ class _YoloPageState extends State<YoloPage> {
 
       if (score > _confThreshold) {
         // Coordonnées brutes (0-1 ou pixels selon export)
-        // Si ton export onnx2tf sort du 0-1, on multiplie par _inputSize
         double cx = outputBuffer[0][0][i] * _inputSize;
         double cy = outputBuffer[0][1][i] * _inputSize;
         double w = outputBuffer[0][2][i] * _inputSize;
